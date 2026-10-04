@@ -54,20 +54,29 @@ class RoutinesViewModel @Inject constructor(
     }
 
     fun toggleRoutine(routine: Routine, enabled: Boolean) = viewModelScope.launch {
+        // Cancel first: once the routine is disabled it disappears from enabledRoutines(), so
+        // rescheduleAll would no longer be able to cancel its pending boundary alarm.
+        if (!enabled) alarmScheduler.cancelAll()
         repo.save(routine.copy(enabled = enabled))
         alarmScheduler.rescheduleAll()
     }
 
     fun delete(routine: Routine) = viewModelScope.launch {
+        // Same reason as toggleRoutine: the row is gone after delete, so cancel beforehand.
+        alarmScheduler.cancelAll()
         repo.delete(routine.id)
         alarmScheduler.rescheduleAll()
     }
 
     fun export(uri: Uri) = viewModelScope.launch {
-        runCatching {
-            context.contentResolver.openOutputStream(uri)?.use { it.write(repo.exportJson().toByteArray()) }
-        }
-        _message.value = context.getString(R.string.exported_toast)
+        val ok = runCatching {
+            context.contentResolver.openOutputStream(uri)?.use {
+                it.write(repo.exportJson().toByteArray())
+            } ?: error("could not open $uri for writing")
+        }.isSuccess
+        _message.value = context.getString(
+            if (ok) R.string.exported_toast else R.string.export_failed_toast
+        )
     }
 
     fun import(uri: Uri) = viewModelScope.launch {

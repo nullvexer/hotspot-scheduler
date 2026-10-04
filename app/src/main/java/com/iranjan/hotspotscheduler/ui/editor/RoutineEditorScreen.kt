@@ -63,7 +63,10 @@ fun RoutineEditorScreen(
     var showStartPicker by remember { mutableStateOf(false) }
     var showEndPicker by remember { mutableStateOf(false) }
     var showPassword by remember { mutableStateOf(false) }
-    val passwordInvalid = draft.hotspotPassword.isNotEmpty() && draft.hotspotPassword.length < 8
+    // Must match HotspotCommands.validPassphrase (8..63 printable ASCII). The old check was only
+// "length < 8", so a 100-char or non-ASCII password was accepted, encrypted, stored, and then
+// silently ignored by the Shizuku engine at toggle time.
+val passwordInvalid = draft.hotspotPassword.isNotEmpty() && !isUsablePassphrase(draft.hotspotPassword)
 
     Column(
         modifier = Modifier
@@ -109,7 +112,12 @@ fun RoutineEditorScreen(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = draft.capText,
-                onValueChange = { value -> viewModel.update { it.copy(capText = value.filter { ch -> ch.isDigit() || ch == '.' }) } },
+                onValueChange = { value ->
+        // A second '.' would make toDoubleOrNull() return null and silently drop the cap.
+        val filtered = value.filter { it.isDigit() || it == '.' }
+        val singleDot = filtered.split('.').size <= 2
+        viewModel.update { it.copy(capText = if (singleDot) filtered else filtered.dropLast(1)) }
+    },
                 label = { Text(stringResource(R.string.editor_cap_hint)) },
                 modifier = Modifier.weight(1f),
                 singleLine = true,

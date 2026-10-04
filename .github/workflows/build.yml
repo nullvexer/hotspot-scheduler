@@ -21,47 +21,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Use the checked-in wrapper so CI builds the same Gradle the project pins.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.1.1'
 
       - name: Run unit tests
-        run: |
-          set -o pipefail
-          gradle testDebugUnitTest --no-daemon 2>&1 | tee gradle-output.txt
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
       - name: Build debug APK
-        run: |
-          set +e
-          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee -a gradle-output.txt
-          gradle_exit=${PIPESTATUS[0]}
-          echo "gradle exit code: $gradle_exit" >> gradle-output.txt
-          if [ "$gradle_exit" -ne 0 ]; then
-            echo "BUILD_FAILED=true" >> "$GITHUB_ENV"
-          fi
-
-      - name: Save failure log to branch
-        if: failure() || env.BUILD_FAILED == 'true'
-        run: |
-          set -x
-          ls -la gradle-output.txt
-          rm -rf /tmp/logrepo
-          mkdir -p /tmp/logrepo
-          cp gradle-output.txt /tmp/logrepo/failure-log.txt
-          cd /tmp/logrepo
-          git init
-          git config user.name "build-bot"
-          git config user.email "build-bot@users.noreply.github.com"
-          git add failure-log.txt
-          git commit -m "failure log for run ${GITHUB_RUN_ID}"
-          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:failure-logs --force
-
-      - name: Fail the run if build failed
-        if: env.BUILD_FAILED == 'true'
-        run: |
-          echo "Build failed. See failure-logs branch for the full log."
-          exit 1
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -75,9 +43,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
           TAG="build-${GITHUB_RUN_NUMBER}"
-          gh release create "$TAG" app/build/outputs/apk/debug/app-debug.apk \
-            --title "Build $TAG" \
-            --notes "Automated APK build" \
-            --repo "${{ github.repository }}" \
-            || gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk --clobber --repo "${{ github.repository }}"
+          SHA="$(git rev-parse --short HEAD)"
+          NOTES="$(printf '%s\n' \
+            "Automated build \`${TAG}\` from commit \`${SHA}\`." \
+            "" \
+            "Install \`app-debug.apk\` on the phone, then open the app and follow the **Setup** tab." \
+            "Shizuku gives instant, lock-screen-safe toggling; the accessibility service is the fallback." \
+            "" \
+            "Diagnostics for any failed toggle are under Setup -> Diagnostics.")"
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber --repo "${{ github.repository }}"
+            gh release edit "$TAG" --notes "$NOTES" --repo "${{ github.repository }}"
+          else
+            gh release create "$TAG" "$APK" \
+              --title "Build $TAG" \
+              --notes "$NOTES" \
+              --repo "${{ github.repository }}"
+          fi
+
+      # The old workflow pushed build logs to a `failure-logs` branch. Failing loudly with the
+      # log attached to the run is simpler and keeps credentials out of a git push.
+      - name: Upload failure log on error
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-log
+          path: app/build/reports/
+          if-no-files-found: ignore

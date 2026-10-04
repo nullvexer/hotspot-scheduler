@@ -40,15 +40,40 @@ itself). Every attempt is recorded to the persistent diagnostics log.
 
 - **Boundary-only enforcement**: ON at window start, OFF at window end; manual changes between
   boundaries are never fought.
+- **Long-gap recovery**: if the app has not run for more than 6 hours, it does not replay a
+  single stale boundary. It reads the actual hotspot state and converges on what the *current*
+  schedule says, so a phone that was off for days can never be left with the hotspot stuck ON.
 - **Strictest cap wins**: one shared daily hotspot counter (reset at midnight); overlapping
-  routines use the lowest cap. Cap hit → OFF + suppressed until midnight.
+  routines use the lowest cap. Cap hit → OFF + suppressed until midnight. The cap is only
+  enforced when Usage Access is granted — without it there is no data at all, so the app says
+  so in the diagnostics log instead of pretending the limit is active.
+- **Wall-clock windows**: a 01:00–04:00 routine ends at 04:00 local time on every day,
+  including the two DST transitions each year. `start == end` is a zero-length window, not
+  "always on".
 - **"Turn off now"** suppresses automation until the next window starts; **"Pause for today"**
   pauses until midnight.
 - **Optional mobile data per routine**: ON at window start; OFF at end only if no other active
   routine needs it.
-- **Per-routine hotspot password** (optional): applied at window start; empty = keep the password
-  already configured in Settings. Stored AES-GCM-encrypted (Android Keystore); never exported.
+- **Per-routine hotspot password** (optional): 8–63 printable ASCII, validated in the editor and
+  by the engine; empty = keep the password already configured in Settings. Stored AES-GCM
+  encrypted (Android Keystore, versioned ciphertext) and never exported. Passwords are never
+  exported or logged.
 - Alerts (cap reached, toggle failure, both engines unavailable) use a high-importance channel.
+
+## Safety invariants
+
+These are the rules the code must never break, each covered by a unit test:
+
+1. **Never claim a hotspot is off when the state is unknown.** A failed `dumpsys` probe returns
+   null, and null is not `false`. The data-cap path reports "turned off" to the user, so an
+   unverified stop must not be reported as success.
+2. **Never click a switch whose row text does not positively match.** A stale calibration is a
+   hint, not an override: it goes through the same keyword/negative-word scoring as every other
+   matching strategy, and there is no "first switch on the screen" fallback.
+3. **Never use a secret as a password by accident.** Decryption failures return null rather than
+   the stored ciphertext, because a Base64 blob is itself a valid 8–63 char passphrase.
+4. **Never leave user data to chance.** No destructive database migration, and export/import
+   round-trips the mobile-data flag and validates every field.
 
 ## Build
 

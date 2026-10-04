@@ -81,10 +81,10 @@ fun RoutinesScreen(
                 title = { Text(stringResource(R.string.routines_title)) },
                 actions = {
                     IconButton(onClick = { exportLauncher.launch("hotspot_routines.json") }) {
-                        Icon(Icons.Outlined.FileUpload, contentDescription = stringResource(R.string.export))
+                        Icon(Icons.Outlined.FileDownload, contentDescription = stringResource(R.string.export))
                     }
                     IconButton(onClick = { importLauncher.launch(arrayOf("application/json")) }) {
-                        Icon(Icons.Outlined.FileDownload, contentDescription = stringResource(R.string.import_routines))
+                        Icon(Icons.Outlined.FileUpload, contentDescription = stringResource(R.string.import_routines))
                     }
                     Spacer(Modifier.width(4.dp))
                     Switch(checked = master, onCheckedChange = { viewModel.setMaster(it) })

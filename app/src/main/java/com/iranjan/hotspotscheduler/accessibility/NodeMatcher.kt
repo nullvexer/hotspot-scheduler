@@ -67,8 +67,9 @@ object NodeMatcher {
         val editable = editors.filter { it.isEditable }
         return when (editable.size) {
             1 -> editable[0]
-            0 -> null
-            else -> editable.last()
+            // Ambiguous: the hotspot screen has an EditText for the network name too, and
+            // guessing would rename the user's SSID to their password. Report "not found".
+            else -> null
         }
     }
 
@@ -106,20 +107,26 @@ object NodeMatcher {
     fun readState(match: ToggleMatch): Boolean? {
         val node = match.stateNode
         if (node.isCheckable) return node.isChecked
-        var parent = node.parent ?: return null
-        repeat(MAX_ANCESTOR_HOPS) {
-            var found: Boolean? = null
-            for (i in 0 until parent.childCount) {
-                val sibling = parent.getChild(i) ?: continue
-                if (sibling.viewIdResourceName == SWITCH_TEXT_ID) {
-                    found = onOffToBoolean(sibling.text?.toString())
-                    break
+        // Any property read below can throw on a recycled/stale node; an unreadable state must
+        // never escape as an exception, callers treat null as "not sure, keep escalating".
+        return try {
+            var parent = node.parent ?: return null
+            repeat(MAX_ANCESTOR_HOPS) {
+                var found: Boolean? = null
+                for (i in 0 until parent.childCount) {
+                    val sibling = parent.getChild(i) ?: continue
+                    if (sibling.viewIdResourceName == SWITCH_TEXT_ID) {
+                        found = onOffToBoolean(sibling.text?.toString())
+                        break
+                    }
                 }
+                if (found != null) return found
+                parent = parent.parent ?: return null
             }
-            if (found != null) return found
-            parent = parent.parent ?: return null
+            null
+        } catch (t: Throwable) {
+            null
         }
-        return null
     }
 
     fun setText(node: AccessibilityNodeInfo, value: String): Boolean {
@@ -144,23 +151,22 @@ object NodeMatcher {
 
             CALIB_TYPE_CLASS_SIG -> findByClassSignature(root, sig.value)
                 ?.let { wrap(it, "calibrated:$CALIB_TYPE_CLASS_SIG") }
+                ?.takeIf { rowScore(rowTextOf(it.stateNode), KEYWORD_HOTSPOT) > 0 }
 
             else -> null
         }
 
     private fun findByClassSignature(root: AccessibilityNodeInfo, value: String): AccessibilityNodeInfo? {
-        val parts = value.split("|")
+        val parts = value.split("|", limit = 3)
         if (parts.size < 3) return null
         val className = parts[0]
         val label = parts[1]
         val index = parts[2].toIntOrNull() ?: 0
         var sameClassSeen = 0
-        var firstOfClass: AccessibilityNodeInfo? = null
         var labeledMatch: AccessibilityNodeInfo? = null
         var indexedMatch: AccessibilityNodeInfo? = null
         forEachNode(root) { node ->
             if (node.className?.toString() != className) return@forEachNode
-            if (firstOfClass == null) firstOfClass = node
             sameClassSeen++
             if (indexedMatch == null && sameClassSeen - 1 == index) indexedMatch = node
             if (labeledMatch == null && label.isNotBlank()) {
@@ -169,7 +175,9 @@ object NodeMatcher {
                 }
             }
         }
-        return labeledMatch ?: indexedMatch ?: firstOfClass
+        // Never fall back to "the first node of this class": after a Settings update that is
+        // whichever switch happens to come first, i.e. possibly Wi-Fi or Bluetooth.
+        return labeledMatch ?: indexedMatch
     }
 
     private fun findByResourceId(root: AccessibilityNodeInfo, rowKeyword: String): ToggleMatch? {
@@ -330,7 +338,11 @@ object NodeMatcher {
         while (queue.isNotEmpty() && count < maxNodes) {
             val node = queue.removeFirst()
             count++
-            action(node)
+            // One bad node must not abort a whole tree walk.
+            try {
+                action(node)
+            } catch (t: Throwable) {
+            }
             for (i in 0 until node.childCount) {
                 try {
                     node.getChild(i)?.let { queue.add(it) }

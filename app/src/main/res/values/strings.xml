@@ -94,6 +94,7 @@
     <string name="export">Export routines</string>
     <string name="import_routines">Import routines</string>
     <string name="exported_toast">Routines exported</string>
+    <string name="export_failed_toast">Export failed: could not write the file</string>
     <string name="imported_toast">Imported %1$d routine(s)</string>
     <string name="import_failed_toast">Import failed: invalid file</string>
 

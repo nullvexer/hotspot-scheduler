@@ -13,6 +13,8 @@ import com.iranjan.hotspotscheduler.toggle.ShizukuEngine
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
@@ -38,6 +40,14 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
 
     private val powerManager: PowerManager? = context.getSystemService(PowerManager::class.java)
     private val keyguardManager: KeyguardManager? = context.getSystemService(KeyguardManager::class.java)
+
+    /**
+     * Serializes every toggle. This is a @Singleton whose keyguardLock is process-global:
+     * without this, a "turn off now" launched from a notification could restore the
+     * keyguard underneath an in-flight boundary toggle (or vice versa), and two concurrent
+     * attempts would both drive the same Settings tree.
+     */
+    private val toggleLock = Mutex()
     private var keyguardLock: KeyguardManager.KeyguardLock? = null
 
     override suspend fun readHotspotState(): Boolean? = shizukuReadState() ?: accessibilityReadHotspotState()
@@ -54,7 +64,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
     private suspend fun accessibilityReadHotspotState(): Boolean? {
         val service = AccessibilityServiceHolder.service ?: return null
         val calibration = prefs.calibration()
-        return withContext(Dispatchers.Main) {
+        return withContext(Dispatchers.Default) {
             val root = service.rootNode()
             if (root == null || root.packageName?.toString() != SETTINGS_PACKAGE) return@withContext null
             val match = NodeMatcher.findToggle(root, calibration, KEYWORD_HOTSPOT) ?: return@withContext null
@@ -62,10 +72,16 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         }
     }
 
-    override suspend fun setHotspotState(targetOn: Boolean, password: String?): ToggleResult {
+    override suspend fun setHotspotState(targetOn: Boolean, password: String?): ToggleResult =
+        toggleLock.withLock { setHotspotStateLocked(targetOn, password) }
+
+    private suspend fun setHotspotStateLocked(targetOn: Boolean, password: String?): ToggleResult {
         if (shizuku.isReady() && shizuku.hotspotCommandSupported()) {
             AttemptLog.add("engine=shizuku hotspot target=$targetOn")
-            val result = shizukuToggleHotspot(targetOn, password)
+            val result = withTimeoutOrNull(SHIZUKU_TIMEOUT_MS) {
+                shizukuToggleHotspot(targetOn, password)
+            }
+            if (result == null) AttemptLog.add("shizuku hotspot timed out after ${SHIZUKU_TIMEOUT_MS}ms")
             if (result != null) return result
             AttemptLog.add("shizuku hotspot failed; falling back to accessibility")
         } else {
@@ -113,13 +129,15 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             }
         }
 
-        // Learn & cache SSID/security from the live dump whenever available.
-        if (state?.ssid != null) {
-            prefs.setApConfig(state.ssid, null, state.open == true)
-        }
+        // Learn & cache SSID/security from the live dump whenever available. Read the cache
+        // FIRST and carry the known passphrase across: setApConfig(ssid, null, ..) blanks it,
+        // which would leave a secured hotspot with no way to start it.
         val cached = prefs.apConfig()
         val ssid = state?.ssid ?: cached.ssid ?: HotspotCommands.DEFAULT_SSID
         val knownOpen = state?.open ?: if (cached.ssid != null) cached.open else false
+        if (state?.ssid != null) {
+            prefs.setApConfig(state.ssid, cached.passphrase, state.open == true)
+        }
 
         if (knownOpen) {
             // The user's hotspot is an open network; start it the same way.
@@ -182,20 +200,24 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         return result
     }
 
-    override suspend fun setMobileData(targetOn: Boolean): ToggleResult {
+    override suspend fun setMobileData(targetOn: Boolean): ToggleResult = toggleLock.withLock {
         if (shizuku.isReady()) {
             val state = shizuku.mobileDataState()
             if (state == targetOn) {
                 AttemptLog.add("MOBILE DATA target=$targetOn -> ALREADY_OK (shizuku)")
-                return ToggleResult.ALREADY_OK
+                return@withLock ToggleResult.ALREADY_OK
             }
-            val ok = shizuku.mobileData(targetOn)
-            val after = shizuku.mobileDataState()
-            if (ok && (after == null || after == targetOn)) {
+            val toggled = withTimeoutOrNull(SHIZUKU_TIMEOUT_MS) {
+                val ok = shizuku.mobileData(targetOn)
+                val after = shizuku.mobileDataState()
+                // A null read is UNKNOWN, not confirmation: `svc data` can exit 0 and do nothing.
+                if (ok && after == targetOn) ToggleResult.TOGGLED else null
+            }
+            if (toggled != null) {
                 AttemptLog.add("MOBILE DATA target=$targetOn -> TOGGLED (shizuku)")
-                return ToggleResult.TOGGLED
+                return@withLock toggled
             }
-            AttemptLog.add("shizuku mobile data failed; falling back to accessibility")
+            AttemptLog.add("shizuku mobile data unverified or timed out; falling back to accessibility")
         } else {
             AttemptLog.add("engine=accessibility (shizuku not ready)")
         }
@@ -204,7 +226,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         } ?: ToggleResult.FAILED
         AttemptLog.add("MOBILE DATA target=$targetOn -> $result")
         Log.i(TAG, "mobile data toggle targetOn=$targetOn result=$result")
-        return result
+        result
     }
 
     override suspend fun requestCalibrationDump() {
@@ -213,9 +235,11 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
     }
 
     private fun isUnlocked(): Boolean {
-        val pm = powerManager ?: return true
+        // Fail closed: acting on a screen the user cannot see is worse than falling through
+        // to the manual-prompt tier, which tells them what happened.
+        val pm = powerManager ?: return false
         if (!pm.isInteractive) return false
-        val km = keyguardManager ?: return true
+        val km = keyguardManager ?: return false
         return !km.isKeyguardLocked
     }
 
@@ -278,19 +302,19 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         password: String?
     ): ToggleResult {
         AttemptLog.add("=== toggle $rowKeyword target=$targetOn start")
-        attempt(rowKeyword, targetOn, useCalibration, password)?.let { return it }
+        settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
         wakeAndDisableKeyguard()
         delay(1_500)
-        attempt(rowKeyword, targetOn, useCalibration, password)?.let { return it }
+        settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
         var launched = false
         if (isUnlocked() && Settings.canDrawOverlays(context)) {
             launched = launchFor(rowKeyword)
             awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
-            attempt(rowKeyword, targetOn, useCalibration, password)?.let { return it }
-            navigateFor(rowKeyword)
-            attempt(rowKeyword, targetOn, useCalibration, password)?.let { return it }
+            settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+            navigateFor(rowKeyword, useCalibration)
+            settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
             logScreenDump(rowKeyword)
             return ToggleResult.FAILED
         }
@@ -305,10 +329,10 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             if (!launched && isUnlocked() && Settings.canDrawOverlays(context)) {
                 launched = launchFor(rowKeyword)
             }
-            attempt(rowKeyword, targetOn, useCalibration, password)?.let { return it }
+            settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
             iterations++
             if (iterations % 8 == 0) {
-                navigateFor(rowKeyword)
+                navigateFor(rowKeyword, useCalibration)
             }
             delay(500)
         }
@@ -316,29 +340,37 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         return ToggleResult.FAILED
     }
 
-    private suspend fun navigateFor(rowKeyword: String): Boolean {
+    /**
+     * A definitive result from [attempt] stops the ladder; FAILED must not, or a single
+     * un-tappable click would skip wake/unlock, launch+navigate and the manual prompt.
+     */
+    private fun settle(result: ToggleResult?): ToggleResult? =
+        if (result != null && result != ToggleResult.FAILED) result else null
+
+    private suspend fun navigateFor(rowKeyword: String, useCalibration: Boolean): Boolean {
+        val calibration = if (useCalibration) prefs.calibration() else null
         val intermediates = if (rowKeyword == KEYWORD_MOBILE_DATA) {
             listOf("data usage", "connections")
         } else {
             listOf("mobile hotspot and tethering", "connections")
         }
         for (label in intermediates) {
-            val row = withContext(Dispatchers.Main) {
+            val row = withContext(Dispatchers.Default) {
                 NodeMatcher.findClickableRow(rootNode(), label)
             } ?: continue
-            withContext(Dispatchers.Main) {
+            withContext(Dispatchers.Default) {
                 row.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             }
             AttemptLog.add("clicked '$label' to navigate")
             delay(1_800)
-            if (findToggle(rowKeyword, null) != null) return true
+            if (findToggle(rowKeyword, calibration) != null) return true
         }
         return false
     }
 
     private suspend fun logScreenDump(rowKeyword: String) {
         val root = rootNode() ?: return
-        val lines = withContext(Dispatchers.Main) { NodeDumper.dumpCompact(root, 40) }
+        val lines = withContext(Dispatchers.Default) { NodeDumper.dumpCompact(root, 40) }
         AttemptLog.add("screen dump for '$rowKeyword':")
         lines.forEach { AttemptLog.add(it) }
     }
@@ -361,10 +393,12 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         password: String?
     ): ToggleResult? {
         val calibration = if (useCalibration) prefs.calibration() else null
+        var openedConfig = false
         var match = findToggle(rowKeyword, calibration)
         if (match == null) {
             if (rowKeyword == KEYWORD_HOTSPOT && password != null && targetOn) {
                 openHotspotConfigScreen()
+                openedConfig = true
                 match = findToggle(rowKeyword, calibration) ?: return null
             } else {
                 return null
@@ -373,11 +407,14 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         AttemptLog.add("match=${match.source}")
 
         if (password != null && targetOn && rowKeyword == KEYWORD_HOTSPOT) {
-            applyPassword(password)
+            // Only touch the password field when it is already on screen. Navigating to the
+            // config screen from here would move away from the switch we just matched, and
+            // the routine would then fail *because* it carries a password.
+            applyPassword(password, allowNavigation = openedConfig)
             match = findToggle(rowKeyword, calibration) ?: return null
         }
 
-        val before = withContext(Dispatchers.Main) { NodeMatcher.readState(match) }
+        val before = withContext(Dispatchers.Default) { NodeMatcher.readState(match) }
         if (before == null) {
             AttemptLog.add("state unreadable")
             return null
@@ -385,7 +422,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         AttemptLog.add("state before=$before")
         if (before == targetOn) return ToggleResult.ALREADY_OK
 
-        withContext(Dispatchers.Main) {
+        withContext(Dispatchers.Default) {
             match.clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
         AttemptLog.add("click sent")
@@ -396,11 +433,11 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
 
         val retryMatch = findToggle(rowKeyword, calibration)
         if (retryMatch != null) {
-            val stateAfter = withContext(Dispatchers.Main) { NodeMatcher.readState(retryMatch) }
+            val stateAfter = withContext(Dispatchers.Default) { NodeMatcher.readState(retryMatch) }
             if (stateAfter == targetOn) return ToggleResult.TOGGLED
             if (stateAfter == before) {
                 AttemptLog.add("retrying click once")
-                withContext(Dispatchers.Main) {
+                withContext(Dispatchers.Default) {
                     retryMatch.clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 }
                 if (awaitStateChange(before, rowKeyword, calibration)) {
@@ -412,14 +449,14 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         return ToggleResult.FAILED
     }
 
-    private suspend fun applyPassword(password: String) {
-        var editor = withContext(Dispatchers.Main) {
+    private suspend fun applyPassword(password: String, allowNavigation: Boolean) {
+        var editor = withContext(Dispatchers.Default) {
             NodeMatcher.findPasswordEditor(settingsRoot())
         }
-        if (editor == null) {
+        if (editor == null && allowNavigation) {
             Log.i(TAG, "password field not on screen; opening hotspot config screen")
             openHotspotConfigScreen()
-            editor = withContext(Dispatchers.Main) {
+            editor = withContext(Dispatchers.Default) {
                 NodeMatcher.findPasswordEditor(settingsRoot())
             }
         }
@@ -427,19 +464,19 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             AttemptLog.add("password field not found; keeping existing password")
             return
         }
-        val applied = withContext(Dispatchers.Main) { NodeMatcher.setText(editor, password) }
+        val applied = withContext(Dispatchers.Default) { NodeMatcher.setText(editor, password) }
         AttemptLog.add("password applied=$applied")
         delay(400)
     }
 
     private suspend fun openHotspotConfigScreen() {
-        val row = withContext(Dispatchers.Main) {
+        val row = withContext(Dispatchers.Default) {
             NodeMatcher.findClickableRow(settingsRoot(), KEYWORD_HOTSPOT)
         } ?: run {
             AttemptLog.add("hotspot row not found for click-through")
             return
         }
-        withContext(Dispatchers.Main) {
+        withContext(Dispatchers.Default) {
             row.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
         AttemptLog.add("clicked hotspot row to open config screen")
@@ -455,7 +492,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             AttemptLog.add("accessibility service not connected")
             return null
         }
-        return withContext(Dispatchers.Main) {
+        return withContext(Dispatchers.Default) {
             val root = service.rootNode()
             when {
                 root == null -> null
@@ -468,7 +505,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         }
     }
 
-    private suspend fun settingsRoot(): AccessibilityNodeInfo? = withContext(Dispatchers.Main) {
+    private suspend fun settingsRoot(): AccessibilityNodeInfo? = withContext(Dispatchers.Default) {
         val root = rootNode() ?: return@withContext null
         if (root.packageName?.toString() != SETTINGS_PACKAGE) null else root
     }
@@ -495,7 +532,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         while (System.currentTimeMillis() < deadline) {
             delay(300)
             val match = findToggle(rowKeyword, calibration) ?: continue
-            val state = withContext(Dispatchers.Main) { NodeMatcher.readState(match) }
+            val state = withContext(Dispatchers.Default) { NodeMatcher.readState(match) }
             if (state != null && state != before) return true
         }
         return false
@@ -518,5 +555,6 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         private const val SCREEN_WAIT_MS = 6_000L
         private const val MANUAL_WAIT_MS = 180_000L
         private const val TOTAL_TIMEOUT_MS = 200_000L
+        private const val SHIZUKU_TIMEOUT_MS = 60_000L
     }
 }

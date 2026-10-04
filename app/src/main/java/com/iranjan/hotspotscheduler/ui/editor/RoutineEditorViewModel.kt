@@ -10,6 +10,8 @@ import com.iranjan.hotspotscheduler.data.repo.RoutineRepository
 import com.iranjan.hotspotscheduler.util.Formatters
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -41,6 +43,9 @@ class RoutineEditorViewModel @Inject constructor(
     private val _overlapNames = MutableStateFlow<List<String>>(emptyList())
     val overlapNames: StateFlow<List<String>> = _overlapNames
 
+    /** Overlap checks hit the DB; debounce so typing does not fire one query per keystroke. */
+    private var overlapJob: Job? = null
+
     fun load(routineId: Long) = viewModelScope.launch {
         if (routineId <= 0) {
             refreshOverlaps()
@@ -63,14 +68,6 @@ class RoutineEditorViewModel @Inject constructor(
         refreshOverlaps()
     }
 
-    private fun formatCapText(capMb: Long): String =
-        if (capMb >= 1024) {
-            val gb = capMb / 1024.0
-            if (gb % 1.0 == 0.0) gb.toInt().toString() else "%.1f".format(gb)
-        } else {
-            capMb.toString()
-        }
-
     fun update(transform: (RoutineDraft) -> RoutineDraft) {
         _draft.value = transform(_draft.value)
         refreshOverlaps()
@@ -81,7 +78,11 @@ class RoutineEditorViewModel @Inject constructor(
     }
 
     private fun refreshOverlaps() {
-        viewModelScope.launch {
+        // Cancel the previous query: without this, two edits in quick succession could resolve
+        // out of order and show the overlap list for a stale draft.
+        overlapJob?.cancel()
+        overlapJob = viewModelScope.launch {
+            delay(OVERLAP_DEBOUNCE_MS)
             val d = _draft.value
             val capMb = capMbOf(d)
             val temp = Routine(
@@ -119,8 +120,43 @@ class RoutineEditorViewModel @Inject constructor(
     }
 
     fun delete(onDone: () -> Unit) = viewModelScope.launch {
-        if (_draft.value.id > 0) repo.delete(_draft.value.id)
+        if (_draft.value.id > 0) {
+            // Cancel BEFORE deleting: rescheduleAll can only cancel alarms for routines it can
+            // still see, so deleting first would leave this routine's boundary alarm armed.
+            alarmScheduler.cancelAll()
+            repo.delete(_draft.value.id)
+        }
         alarmScheduler.rescheduleAll()
         onDone()
     }
+
+    companion object {
+        private const val OVERLAP_DEBOUNCE_MS = 250L
+    }
 }
+
+/**
+ * Renders a cap back into the editable text field without losing precision.
+ *
+ * The previous version printed "1.5" for 1500 MB (>= 1024 switches the field to GB) and then
+ * re-read it as 1.5 GB = 1536 MB, so merely opening and saving a routine inflated its cap.
+ */
+private fun formatCapText(capMb: Long): String =
+    if (capMb >= 1024) {
+        val gb = capMb / 1024.0
+        // Keep 3 decimals so any whole-MB cap round-trips exactly.
+        if (gb % 1.0 == 0.0) gb.toInt().toString() else trimTrailingZeros("%.3f".format(gb))
+    } else {
+        capMb.toString()
+    }
+
+private fun trimTrailingZeros(value: String): String =
+    value.trimEnd('0').trimEnd('.')
+
+/**
+ * Validates a candidate passphrase with the same rule the Shizuku engine applies
+ * (HotspotCommands.validPassphrase). Kept public so the editor screen and the unit tests share
+ * exactly one definition of "usable password".
+ */
+fun isUsablePassphrase(password: String): Boolean =
+    password.length in 8..63 && password.all { it.code in 32..126 }

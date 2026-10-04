@@ -129,16 +129,39 @@ class RoutineEvaluatorTest {
     }
 
     @Test
-    fun `dst spring forward keeps wall-clock start and duration based end`() {
+    fun `dst spring forward keeps the configured wall-clock end`() {
+        // 2026-03-29 02:00->03:00 does not exist in Europe/Berlin. The routine is 01:00-04:00,
+        // so it must still END at 04:00 wall clock, i.e. after 2 real hours, not 3.
         val window = RoutineEvaluator.windowOnDay(routine(setOf(7), 1 * 60, 4 * 60), LocalDate.parse("2026-03-29"), zone)!!
         assertEquals(at("2026-03-29", "01:00"), window.first)
-        assertEquals(3 * 3_600_000L, window.second - window.first)
+        assertEquals(at("2026-03-29", "04:00"), window.second)
+        assertEquals(2 * 3_600_000L, window.second - window.first)
     }
 
     @Test
-    fun `dst fall back also keeps duration`() {
+    fun `dst fall back keeps the configured wall-clock end`() {
+        // 04:00 occurs twice on this date; the first occurrence ends the window, so the window
+        // spans 4 real hours while still being labelled 01:00-04:00.
         val window = RoutineEvaluator.windowOnDay(routine(setOf(7), 1 * 60, 4 * 60), LocalDate.parse("2026-10-25"), zone)!!
         assertEquals(at("2026-10-25", "01:00"), window.first)
-        assertEquals(3 * 3_600_000L, window.second - window.first)
+        assertEquals(at("2026-10-25", "04:00"), window.second)
+        assertEquals(4 * 3_600_000L, window.second - window.first)
+    }
+
+    @Test
+    fun `window outside a dst change is unchanged`() {
+        val window = RoutineEvaluator.windowOnDay(routine(setOf(3), 9 * 60, 17 * 60), LocalDate.parse("2026-06-10"), zone)!!
+        assertEquals(at("2026-06-10", "09:00"), window.first)
+        assertEquals(at("2026-06-10", "17:00"), window.second)
+        assertEquals(8 * 3_600_000L, window.second - window.first)
+    }
+
+    @Test
+    fun `overnight window still ends after it starts across a dst change`() {
+        // 23:00 -> 02:00 on the spring-forward date; the end must roll into the next day.
+        val window = RoutineEvaluator.windowOnDay(routine(setOf(7), 23 * 60, 2 * 60), LocalDate.parse("2026-03-29"), zone)!!
+        assertEquals(at("2026-03-29", "23:00"), window.first)
+        assertTrue(window.second > window.first)
+        assertEquals(at("2026-03-30", "02:00"), window.second)
     }
 }

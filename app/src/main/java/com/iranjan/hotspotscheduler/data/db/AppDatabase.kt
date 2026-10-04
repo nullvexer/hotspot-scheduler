@@ -24,10 +24,14 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2)
+
         fun build(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "hotspot_scheduler.db")
-                .addMigrations(MIGRATION_1_2)
-                .fallbackToDestructiveMigration()
+                .addMigrations(*MIGRATIONS)
+                // NO fallbackToDestructiveMigration(): every row here is a user-authored
+                // schedule, so silently dropping the table on a missing migration is worse than
+                // failing loudly. A future version bump MUST add a migration here.
                 .build()
     }
 }

@@ -18,9 +18,13 @@ import com.iranjan.hotspotscheduler.util.Formatters
 import com.iranjan.hotspotscheduler.accessibility.AttemptLog
 import com.iranjan.hotspotscheduler.toggle.ShizukuEngine
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.ZoneId
 import javax.inject.Inject
@@ -38,6 +42,12 @@ class HotspotAutomationService : LifecycleService() {
 
     private val wake = Channel<Unit>(Channel.CONFLATED)
 
+    /**
+     * Serialises tick() against the notification actions. Without it a "turn off now" from the
+     * shade could interleave with a boundary toggle and leave the hotspot in the wrong state.
+     */
+    private val workLock = Mutex()
+
     override fun onCreate() {
         super.onCreate()
         startForeground(
@@ -46,10 +56,15 @@ class HotspotAutomationService : LifecycleService() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
         lifecycleScope.launch {
-            // Alarms do not survive reboot/process death; force a reschedule on every
-            // service creation so boundary alarms are always re-registered.
-            prefs.setAlarmsDirty(true)
-            loop()
+            // lifecycleScope runs on Dispatchers.Main.immediate, but a tick performs up to
+            // 4x1500 accessibility-node traversals plus blocking shell calls. Running that on
+            // the main looper is an ANR. Nothing in the tick touches the UI directly.
+            withContext(Dispatchers.Default) {
+                // Alarms do not survive reboot/process death; force a reschedule on every
+                // service creation so boundary alarms are always re-registered.
+                prefs.setAlarmsDirty(true)
+                loop()
+            }
         }
         Log.i(TAG, "foreground service created")
     }
@@ -57,8 +72,12 @@ class HotspotAutomationService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_PAUSE_TODAY -> lifecycleScope.launch { pauseToday() }
-            ACTION_TURN_OFF_NOW -> lifecycleScope.launch { turnOffNow() }
+            ACTION_PAUSE_TODAY -> lifecycleScope.launch(Dispatchers.Default) {
+                workLock.withLock { pauseToday() }
+            }
+            ACTION_TURN_OFF_NOW -> lifecycleScope.launch(Dispatchers.Default) {
+                workLock.withLock { turnOffNow() }
+            }
             else -> wake.trySend(Unit)
         }
         return START_STICKY
@@ -79,9 +98,10 @@ class HotspotAutomationService : LifecycleService() {
     private suspend fun loop() {
         while (true) {
             try {
-                tick()
+                workLock.withLock { tick() }
             } catch (t: Throwable) {
                 Log.e(TAG, "tick failed", t)
+                AttemptLog.add("tick failed: ${t.message}")
             }
             withTimeoutOrNull(TICK_MS) { wake.receive() }
         }
@@ -126,7 +146,16 @@ class HotspotAutomationService : LifecycleService() {
             val last = RoutineEvaluator.lastBoundary(routines, now, zone)
             val lastApplied = prefs.lastAppliedBoundary.first()
             if (last != null && lastApplied != last.key) {
-                applyBoundary(last, paused, capHit, capMb, usage)
+                // Replaying history is only correct for a recent gap. After a long absence
+                // (phone off, app not installed) the single "last" boundary is a poor proxy for
+                // intent and the hotspot can be stranded ON with no future boundary to end it.
+                val appliedAt = RoutineEvaluator.boundaryAtMillis(lastApplied)
+                val gapMs = if (appliedAt == null) Long.MAX_VALUE else now - appliedAt
+                if (gapMs > CATCHUP_GAP_MS) {
+                    reconcileToDesiredState(active, last.key, gapMs)
+                } else {
+                    applyBoundary(last, paused, capHit, capMb, usage)
+                }
                 alarmScheduler.rescheduleAll()
             } else if (prefs.alarmsDirty()) {
                 // Survive reboots/process death: alarms are not persisted by the OS.
@@ -137,16 +166,22 @@ class HotspotAutomationService : LifecycleService() {
         }
 
         if (master && !paused && !capHit && capMb != null) {
-            val bytes = usage?.bytes ?: 0L
-            if (bytes >= capMb * 1024L * 1024L) {
-                prefs.setCapHitEpochDay(today)
-                val result = controller.setHotspotState(false)
-                notifications.notifyCapReached(
-                    Formatters.formatBytes(bytes),
-                    Formatters.formatCapMb(capMb),
-                    result == ToggleResult.FAILED
-                )
-                Log.i(TAG, "cap reached usage=$bytes capMb=$capMb result=$result")
+            if (usage == null) {
+                // No usage access => no data at all, so the cap can never trip. Say so instead
+                // of letting the user believe a limit is being enforced.
+                AttemptLog.add("data cap not enforced: usage access not granted")
+            } else {
+                val bytes = usage.bytes
+                if (bytes >= capMb * 1024L * 1024L) {
+                    prefs.setCapHitEpochDay(today)
+                    val result = controller.setHotspotState(false)
+                    notifications.notifyCapReached(
+                        Formatters.formatBytes(bytes),
+                        Formatters.formatCapMb(capMb),
+                        result == ToggleResult.FAILED
+                    )
+                    Log.i(TAG, "cap reached usage=$bytes capMb=$capMb result=$result")
+                }
             }
         }
 
@@ -167,6 +202,37 @@ class HotspotAutomationService : LifecycleService() {
             )
         )
         WidgetProvider.updateAll(applicationContext, hotspotKnown, usage?.bytes, capMb)
+    }
+
+    /**
+     * Long-gap recovery. Replaying a single stale boundary is meaningless when the device was
+     * off for hours, so converge on what the *current* schedule says instead of what one old
+     * boundary said. Only acts when the real state is observable and disagrees, so an unknown
+     * state never causes a toggle.
+     */
+    private suspend fun reconcileToDesiredState(
+        active: List<com.iranjan.hotspotscheduler.data.model.Routine>,
+        boundaryKey: String,
+        gapMs: Long
+    ) {
+        val target = active.isNotEmpty()
+        val current = controller.readHotspotState()
+        val gapText = if (gapMs == Long.MAX_VALUE) "unknown" else "${gapMs / 3_600_000}h"
+        Log.i(TAG, "long gap ($gapText) since last applied boundary; reconciling to target=$target")
+        AttemptLog.add("long gap (${gapText}) since last boundary; reconcile target=$target current=$current")
+        if (current == null) {
+            // Cannot observe the hotspot; do not guess. Record the boundary so the next tick
+            // does not keep retrying this every 2 minutes.
+            prefs.setLastAppliedBoundary(boundaryKey)
+            return
+        }
+        if (current == target) {
+            prefs.setLastAppliedBoundary(boundaryKey)
+            return
+        }
+        val result = controller.setHotspotState(target)
+        if (result == ToggleResult.FAILED) notifications.notifyToggleFailed()
+        prefs.setLastAppliedBoundary(boundaryKey)
     }
 
     private suspend fun applyBoundary(
@@ -238,6 +304,9 @@ class HotspotAutomationService : LifecycleService() {
         private const val TICK_MS = 2 * 60 * 1000L
         private const val ACC_ALERT_COOLDOWN_MS = 60 * 60 * 1000L
         private const val KEEP_DAYS = 30L
+
+        /** Beyond this gap, converge on the current schedule instead of replaying one boundary. */
+        private const val CATCHUP_GAP_MS = 6 * 60 * 60 * 1000L
 
         const val ACTION_START = "com.iranjan.hotspotscheduler.START"
         const val ACTION_REFRESH = "com.iranjan.hotspotscheduler.REFRESH"
