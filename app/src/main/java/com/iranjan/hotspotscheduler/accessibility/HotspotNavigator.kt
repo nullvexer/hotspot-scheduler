@@ -8,6 +8,11 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * Resolves which Settings activity hosts the hotspot and data-usage screens on this device/ROM,
+ * then opens it through [ScreenControl] (which goes via a foreground host activity, because Android
+ * blocks background activity starts).
+ */
 @Singleton
 class HotspotNavigator @Inject constructor(@ApplicationContext private val context: Context) {
 
@@ -23,60 +28,58 @@ class HotspotNavigator @Inject constructor(@ApplicationContext private val conte
     private val dataUsageCandidates = listOf(
         ComponentName("com.android.settings", "com.android.settings.Settings\$DataUsageSummaryActivity"),
         ComponentName("com.android.settings", "com.android.settings.datausage.DataUsageSettings"),
-        ComponentName("com.samsung.android.settings", "com.samsung.android.settings.datausage.DataUsageSettings"),
-        ComponentName("com.android.settings", "com.samsung.android.settings.datausage.DataUsageSettings")
+        ComponentName("com.samsung.android.settings", "com.samsung.android.settings.datausage.DataUsageSettings")
     )
 
-    private fun resolvableIntents(candidates: List<ComponentName>): List<Intent> {
+    private fun resolvable(candidates: List<ComponentName>): List<ComponentName> {
         val pm = context.packageManager
-        val result = mutableListOf<Intent>()
+        val result = mutableListOf<ComponentName>()
         for (cn in candidates) {
             val intent = Intent(Intent.ACTION_MAIN).setComponent(cn)
             try {
-                if (pm.resolveActivity(intent, 0) != null) {
-                    result.add(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
-                }
+                if (pm.resolveActivity(intent, 0) != null) result.add(cn)
             } catch (t: Throwable) {
+                // A candidate that cannot be resolved is simply skipped.
             }
         }
         return result
     }
 
-    private fun launchFirst(intents: List<Intent>, fallback: Intent): Boolean = try {
-        val intent = intents.firstOrNull() ?: fallback
-        context.startActivity(intent)
-        true
-    } catch (t: Throwable) {
-        false
+    private fun firstResolvable(candidates: List<ComponentName>, action: String): ComponentName? {
+        resolvable(candidates).firstOrNull()?.let { return it }
+        // No explicit component resolved: fall back to the generic Settings screen.
+        val implicit = Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            context.packageManager.resolveActivity(implicit, 0)?.let {
+                val info = it.activityInfo
+                ComponentName(info.packageName, info.name)
+            }
+        } catch (t: Throwable) {
+            null
+        }
     }
 
-    fun hotspotSettingsIntents(): List<Intent> =
-        resolvableIntents(hotspotCandidates) + listOf(
-            Intent(Settings.ACTION_WIRELESS_SETTINGS)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        )
+    fun hotspotTarget(): ComponentName? =
+        firstResolvable(hotspotCandidates, Settings.ACTION_WIRELESS_SETTINGS)
 
-    fun dataUsageIntents(): List<Intent> =
-        resolvableIntents(dataUsageCandidates) + listOf(
-            Intent(Settings.ACTION_DATA_USAGE_SETTINGS)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        )
+    fun dataUsageTarget(): ComponentName? =
+        firstResolvable(dataUsageCandidates, Settings.ACTION_DATA_USAGE_SETTINGS)
 
-    fun launchHotspotSettings(): Boolean = try {
-        context.startActivity(hotspotSettingsIntents().first())
-        true
-    } catch (t: Throwable) {
-        false
+    suspend fun launchHotspotSettings(screen: ScreenControl): Boolean {
+        val target = hotspotTarget()
+        if (target == null) {
+            AttemptLog.add("no hotspot Settings activity could be resolved on this device")
+            return false
+        }
+        return screen.launchSettings(target.packageName, target.className)
     }
 
-    fun launchDataUsageSettings(): Boolean = try {
-        context.startActivity(dataUsageIntents().first())
-        true
-    } catch (t: Throwable) {
-        false
+    suspend fun launchDataUsageSettings(screen: ScreenControl): Boolean {
+        val target = dataUsageTarget()
+        if (target == null) {
+            AttemptLog.add("no data-usage Settings activity could be resolved on this device")
+            return false
+        }
+        return screen.launchSettings(target.packageName, target.className)
     }
-
-    fun bestSettingsIntent(): Intent = hotspotSettingsIntents().first()
-
-    fun bestDataUsageIntent(): Intent = dataUsageIntents().first()
 }

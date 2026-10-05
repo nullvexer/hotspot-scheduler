@@ -11,7 +11,8 @@ no root.
 ## What a scheduled toggle does
 
 1. **Turns the screen on** — a `SCREEN_BRIGHT_WAKE_LOCK` with `ACQUIRE_CAUSES_WAKEUP`.
-2. **Dismisses the lock screen** where Android permits it (see the limitation below).
+2. **Unlocks the phone** — `KeyguardManager.requestDismissKeyguard()`, driven from a transparent
+   host activity (the API requires one). See the lock-screen section for exactly when this succeeds.
 3. **Opens the right Settings screen** and navigates to the switch if it is not already up.
 4. **Reads the switch state, clicks it, then reads it again** to confirm. One retry on failure.
 5. **Turns the screen back off** via the device administrator, unless the user was already using
@@ -22,24 +23,43 @@ matches ("Mobile Hotspot" / "Mobile data"), unrelated rows (Bluetooth, Data save
 excluded by a negative score, only windows belonging to a Settings package are ever read, and a
 saved calibration is treated as a hint rather than an override.
 
-## The one hard limitation
+## Unattended unlock
 
-**Android does not allow any app to enter a lock-screen PIN, pattern or password.** The keyguard is
-not an accessibility window and does not accept injected input, and `KeyguardManager.disableKeyguard()`
-is ignored while a secure lock is set. This is a platform restriction, not a missing feature.
+This is the part worth understanding, because it decides whether the app can run on its own at 3am.
 
-So the app's behaviour depends on what you have set:
+The app uses the officially supported `KeyguardManager.requestDismissKeyguard()`. Google's own
+documentation for it states:
 
-| Lock screen | Behaviour |
+> "If the Keyguard is not secure **or the device is currently in a trusted state**, calling this
+> method will immediately dismiss the Keyguard **without any user interaction**. If the Keyguard is
+> secure **and the device is not in a trusted state**, this will bring up the UI so the user can
+> enter their credentials."
+
+That "trusted state" is the whole game. It is what Smart Lock, Extend Unlock and trusted places
+create. So:
+
+| Lock screen | Unattended? |
 |---|---|
-| No PIN, pattern or password | Fully hands-free. Wakes, dismisses the keyguard, toggles, sleeps. |
-| Swipe-only | Fully hands-free. A non-secure keyguard can be dismissed programmatically. |
-| PIN / pattern / password | Wakes the screen, notifies you, and waits up to 2 minutes for you to unlock. |
+| No PIN, pattern or password | Yes — not secure, dismissed instantly |
+| Swipe-only | Yes — not secure, dismissed instantly |
+| PIN/pattern/password **+ Smart Lock / Extend Unlock active** | Yes — trusted state, dismissed instantly, no interaction |
+| PIN/pattern/password, not trusted | The platform raises the credential screen; the app keeps the phone awake and finishes as soon as you unlock |
 
-For hands-free nights with a PIN, either remove the lock credential (Settings → Lock screen), or use
-**Settings → Lock screen → Extend Unlock → Trusted places**, or Smart Lock on a supported device —
-in those cases the keyguard is not securely locked and the app dismisses it by itself. The Setup tab
-shows this state explicitly with a red warning.
+There is deliberately **no PIN-injection code** in this app. The keyguard is not an accessibility
+window and accepts no injected text, so such code would not work on Android 13 — and it is exactly
+the technique malware uses to steal PINs, which would put your phone's own password inside a
+third-party app. The app asks the platform to unlock and reports honestly what happened.
+
+**To get hands-free operation while keeping a PIN**, do one of these:
+
+- **Extend Unlock → Trusted places** — Settings → Lock screen → Extend Unlock → Trusted places, add
+  home. The phone stays unlocked at home and keeps your PIN everywhere else.
+- **Smart Lock** — Settings → Lock screen → Smart Lock: *On-body detection* or *Trusted places*.
+- Remove the lock credential entirely.
+
+The app re-checks on every toggle, because Smart Lock can flip to trusted at any moment (you walk
+in with the phone, your home Wi-Fi appears). Setup shows the current state and links straight to
+those settings.
 
 Turning the screen **off** requires device administrator, because `DevicePolicyManager.lockNow()` is
 the only public API for it. The app requests exactly one policy capability: `force-lock`. No

@@ -185,13 +185,25 @@ class NotificationHelper @Inject constructor(
         )
     }
 
+    /**
+     * Asks the user to open the hotspot Settings screen themselves. Used when the app could not
+     * launch the screen on its own; the target is resolved from the device so the tap lands on the
+     * right screen.
+     */
     fun postOpenHotspotSettingsPrompt() {
-        val pi = PendingIntent.getActivity(
-            context,
-            22,
-            navigator.bestSettingsIntent(),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val target = navigator.hotspotTarget()
+        val pi = if (target != null) {
+            PendingIntent.getActivity(
+                context,
+                22,
+                Intent(Intent.ACTION_MAIN)
+                    .setClassName(target.packageName, target.className)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        } else {
+            mainActivityPendingIntent()
+        }
         nm?.notify(
             ID_OPEN_PROMPT,
             NotificationCompat.Builder(context, CHANNEL_ALERTS)

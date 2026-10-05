@@ -36,6 +36,18 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".accessibility.ToggleHostActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:showOnLockScreen="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:turnScreenOn="true"
+            android:windowShowWallpaper="true" />
+
         <service
             android:name=".service.HotspotAutomationService"
             android:exported="false"

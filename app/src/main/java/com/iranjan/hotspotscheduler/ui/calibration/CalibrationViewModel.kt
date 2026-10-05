@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.iranjan.hotspotscheduler.accessibility.AccessibilityServiceHolder
 import com.iranjan.hotspotscheduler.accessibility.HotspotController
 import com.iranjan.hotspotscheduler.accessibility.HotspotNavigator
+import com.iranjan.hotspotscheduler.accessibility.ScreenControl
 import com.iranjan.hotspotscheduler.data.model.CalibrationSignature
 import com.iranjan.hotspotscheduler.data.model.NodeDump
 import com.iranjan.hotspotscheduler.data.prefs.AutomationPrefs
@@ -20,6 +21,7 @@ class CalibrationViewModel @Inject constructor(
     private val prefs: AutomationPrefs,
     private val controller: HotspotController,
     private val navigator: HotspotNavigator,
+    private val screen: ScreenControl,
     private val notifications: NotificationHelper
 ) : ViewModel() {
 
@@ -37,11 +39,11 @@ class CalibrationViewModel @Inject constructor(
         }
     }
 
-    fun start() {
+    fun start() = viewModelScope.launch {
         AccessibilityServiceHolder.calibrationMode = true
         AccessibilityServiceHolder.clearDumps()
         _mode.value = true
-        if (!navigator.launchHotspotSettings()) {
+        if (!navigator.launchHotspotSettings(screen)) {
             notifications.postOpenHotspotSettingsPrompt()
         }
     }

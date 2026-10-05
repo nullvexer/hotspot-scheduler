@@ -127,14 +127,15 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         // Stage 0: the switch may already be on screen (app left in Settings, user is awake).
         settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
-        // Stage 1: wake the screen and try to clear a non-secure keyguard.
+// Stage 1: wake the screen and ask the platform to clear the keyguard. A trusted state
+        // (Smart Lock / Extend Unlock / trusted places) clears here with no user interaction.
         screen.wakeScreen(WAKE_HOLD_MS)
-        screen.dismissKeyguardIfPermitted()
+        screen.requestKeyguardDismiss()
         delay(SETTLE_DELAY_MS)
         settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
-        // Stage 2: launch Settings and navigate. Background activity starts are restricted, so a
-        // wake lock alone is not always enough to open the screen.
+        // Stage 2: launch Settings and navigate. Background activity starts are restricted, so the
+        // launch goes through the foreground host activity.
         screen.wakeScreen(WAKE_HOLD_MS)
         if (!screen.isLocked()) {
             launchFor(rowKeyword)
@@ -146,30 +147,30 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             return ToggleResult.FAILED
         }
 
-        // Stage 3: the screen is locked.
-        return awaitManualUnlock(rowKeyword, targetOn, useCalibration, password)
+        // Stage 3: waiting on the keyguard.
+        return awaitUnlock(rowKeyword, targetOn, useCalibration, password)
     }
 
-    /**
-     * A secure lock screen cannot be automated: Android does not allow any app to enter a PIN,
-     * pattern or password, and `disableKeyguard()` is ignored while a secure lock is set. So the
-     * app wakes the screen, explains the situation, and waits for the user.
-     *
-     * A non-secure lock is not a reason to wait, so if the keyguard clears we resume automation.
+/**
+     * The screen is locked. A trusted state (Smart Lock, Extend Unlock / trusted places) is
+     * dismissed immediately and without user interaction; otherwise the platform puts the
+     * credential UI up and we wait, re-requesting because Smart Lock can become trusted at any
+     * moment during the window.
      */
-    private suspend fun awaitManualUnlock(
+    private suspend fun awaitUnlock(
         rowKeyword: String,
         targetOn: Boolean,
         useCalibration: Boolean,
         password: String?
     ): ToggleResult {
-        if (!screen.secureLockPresent()) {
-            // Locked but not secure: keep trying to dismiss it and to launch Settings.
-            val deadline = System.currentTimeMillis() + UNLOCK_GRACE_MS
-            while (System.currentTimeMillis() < deadline) {
-                screen.wakeScreen(WAKE_HOLD_MS)
-                screen.dismissKeyguardIfPermitted()
-                if (!screen.isLocked()) {
+        val deadline = System.currentTimeMillis() + UNLOCK_WAIT_MS
+        var requested = false
+        var announced = false
+        while (System.currentTimeMillis() < deadline) {
+            screen.wakeScreen(WAKE_HOLD_MS)
+            when (screen.requestKeyguardDismiss()) {
+                ScreenControl.DismissOutcome.DISMISSED -> {
+                    AttemptLog.add("keyguard cleared; resuming automation")
                     launchFor(rowKeyword)
                     awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
                     settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
@@ -177,33 +178,24 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
                     settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
                     return ToggleResult.FAILED
                 }
-                delay(500)
+                ScreenControl.DismissOutcome.SECURED -> {
+                    requested = true
+                    if (!announced) {
+                        // Tell the user once, and tell them the thing that actually helps.
+                        AttemptLog.add(
+                            "a credential is required to unlock; notifying the user once and " +
+                                "keeping the phone awake"
+                        )
+                        notifications.notifyUnlockRequired()
+                        announced = true
+                    }
+                }
+                ScreenControl.DismissOutcome.UNKNOWN -> requested = true
             }
-            AttemptLog.add("non-secure keyguard would not clear")
-            return ToggleResult.FAILED
-        }
-
-        AttemptLog.add("secure lock screen: Android does not permit automated unlock; notifying the user")
-        notifications.notifyUnlockRequired()
-        val deadline = System.currentTimeMillis() + MANUAL_WAIT_MS
-        var iterations = 0
-        while (System.currentTimeMillis() < deadline) {
-            if (!screen.isLocked()) {
-                AttemptLog.add("user unlocked; resuming automation")
-                launchFor(rowKeyword)
-                awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
-                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-                navigateFor(rowKeyword, useCalibration)
-                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-                return ToggleResult.FAILED
-            }
-            screen.wakeScreen(WAKE_HOLD_MS)
-            iterations++
-            if (iterations % NAVIGATE_EVERY == 0) navigateFor(rowKeyword, useCalibration)
             delay(500)
         }
-        AttemptLog.add("still locked after ${MANUAL_WAIT_MS / 1000}s; giving up")
-        return ToggleResult.BLOCKED
+        AttemptLog.add("still locked after ${UNLOCK_WAIT_MS / 1000}s (requested=$requested)")
+        return if (requested) ToggleResult.BLOCKED else ToggleResult.FAILED
     }
 
     /** Only a definitive result stops the ladder; FAILED means "try the next stage". */
@@ -256,11 +248,11 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         lines.forEach { AttemptLog.add(it) }
     }
 
-    private suspend fun launchFor(rowKeyword: String): Boolean {
+private suspend fun launchFor(rowKeyword: String): Boolean {
         val launched = if (rowKeyword == KEYWORD_HOTSPOT) {
-            navigator.launchHotspotSettings()
+            navigator.launchHotspotSettings(screen)
         } else {
-            navigator.launchDataUsageSettings()
+            navigator.launchDataUsageSettings(screen)
         }
         val root = rootNode()
         AttemptLog.add("launched=$launched screen=${root?.className} pkg=${root?.packageName}")
@@ -443,8 +435,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         private const val STATE_TIMEOUT_MS = 3_000L
         private const val SCREEN_WAIT_MS = 6_000L
         private const val CONFIG_WAIT_MS = 6_000L
-        private const val MANUAL_WAIT_MS = 120_000L
-        private const val UNLOCK_GRACE_MS = 15_000L
+private const val UNLOCK_WAIT_MS = 150_000L
         private const val TOTAL_TIMEOUT_MS = 180_000L
         private const val WAKE_HOLD_MS = 120_000L
         private const val SETTLE_DELAY_MS = 1_200L
