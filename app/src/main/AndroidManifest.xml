@@ -36,6 +36,9 @@
             </intent-filter>
         </activity>
 
+        <!-- Foreground host for the automation flow: wakes the screen, hosts
+             requestDismissKeyguard (which requires an Activity), and gives Settings a visible
+             context to launch from, since Android blocks background activity starts. -->
         <activity
             android:name=".accessibility.ToggleHostActivity"
             android:excludeFromRecents="true"
@@ -45,8 +48,7 @@
             android:showOnLockScreen="true"
             android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:turnScreenOn="true"
-            android:windowShowWallpaper="true" />
+            android:turnScreenOn="true" />
 
         <service
             android:name=".service.HotspotAutomationService"
@@ -85,31 +87,9 @@
             android:name=".service.ActionReceiver"
             android:exported="false" />
 
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.diagnostics"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
-
-        <!-- Device administrator: used only for DevicePolicyManager.lockNow(), which is the
-             single public API that lets an app turn the screen off. -->
-        <receiver
-            android:name=".accessibility.ScreenOffAdminReceiver"
-            android:description="@string/device_admin_description"
-            android:exported="true"
-            android:label="@string/device_admin_label"
-            android:permission="android.permission.BIND_DEVICE_ADMIN">
-            <meta-data
-                android:name="android.app.device_admin"
-                android:resource="@xml/device_admin_policies" />
-            <intent-filter>
-                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
-            </intent-filter>
-        </receiver>
+        <!-- No device administrator any more: screen-off uses
+             AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN (API 28+), which needs no extra
+             permission and no visible system entry. -->
 
         <receiver
             android:name=".service.WidgetProvider"

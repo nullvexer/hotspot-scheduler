@@ -1,49 +1,37 @@
 package com.iranjan.hotspotscheduler.accessibility
 
 import android.app.KeyguardManager
-import android.app.admin.DevicePolicyManager
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import com.iranjan.hotspotscheduler.util.LockCredentialVault
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Screen, keyguard and launch control for the accessibility engine.
+ * Screen on/off, lock detection, and the entry point for unattended unlock.
  *
- * Unlock behaviour follows the documented contract of
- * [android.app.KeyguardManager.requestDismissKeyguard]:
+ * Turning the screen off uses `AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN` (API 28+). That
+ * replaced a Device Administrator, which was a much heavier permission for the same result.
  *
- *  > "If the Keyguard is not secure or the device is currently in a trusted state, calling this
- *  method will immediately dismiss the Keyguard without any user interaction. If the Keyguard is
- *  secure and the device is not in a trusted state, this will bring up the UI so the user can enter
- *  their credentials."
- *
- * A "trusted state" is Smart Lock, Extend Unlock / trusted places, or a recognised device. So the
- * app unlocks unattended whenever Android says it may: no credential, swipe-only, or a trusted
- * state. It keeps trying for the rest of the routine's budget, because Smart Lock can flip to
- * trusted at any moment (you walk in with the phone, a home Wi-Fi appears).
- *
- * Turning the screen off uses [DevicePolicyManager.lockNow], the only public API for it.
- * Turning another Activity on goes through [ToggleHostActivity] because Android blocks background
- * activity starts.
+ * Lock handling has two layers, in order:
+ *  1. `KeyguardManager.requestDismissKeyguard()` — the platform dismisses a non-secure keyguard or
+ *     one in a trusted state (Smart Lock / Extend Unlock) with no interaction.
+ *  2. If a credential is still required, [unlockWithCredential] drives the PIN pad itself through
+ *     the accessibility service. See [KeyguardAutomator] for why that is one bounded attempt.
  */
 @Singleton
-class ScreenControl @Inject constructor(@ApplicationContext private val context: Context) {
-
-    enum class DismissOutcome { DISMISSED, SECURED, UNKNOWN }
+class ScreenControl @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val vault: LockCredentialVault
+) {
 
     private val powerManager: PowerManager? = context.getSystemService(PowerManager::class.java)
     private val keyguardManager: KeyguardManager? = context.getSystemService(KeyguardManager::class.java)
-    private val devicePolicyManager: DevicePolicyManager? =
-        context.getSystemService(DevicePolicyManager::class.java)
-
-    private val adminReceiver = ComponentName(context, ScreenOffAdminReceiver::class.java)
 
     /** True when a PIN, pattern or password (or a locked SIM) is set. */
     fun secureLockPresent(): Boolean = try {
@@ -52,12 +40,12 @@ class ScreenControl @Inject constructor(@ApplicationContext private val context:
         false
     }
 
-    /**
-     * Whether an unattended unlock can succeed right now. A secure lock is still unlockable while
-     * the device counts as trusted (Smart Lock / trusted places), so this is a live reading, not a
-     * permanent verdict.
-     */
-    fun autoUnlockPossible(): Boolean = !secureLockPresent() || !isLocked()
+    /** Authoritative "needs authentication" check; unlike isKeyguardLocked it ignores a swipe lock. */
+    fun isDeviceLocked(): Boolean = try {
+        keyguardManager?.isDeviceLocked ?: false
+    } catch (t: Throwable) {
+        false
+    }
 
     fun isInteractive(): Boolean = try {
         powerManager?.isInteractive == true
@@ -65,28 +53,8 @@ class ScreenControl @Inject constructor(@ApplicationContext private val context:
         false
     }
 
-    fun isLocked(): Boolean = try {
-        keyguardManager?.isKeyguardLocked == true
-    } catch (t: Throwable) {
-        false
-    }
-
-    fun hasDeviceAdmin(): Boolean = try {
-        devicePolicyManager?.isAdminActive(adminReceiver) == true
-    } catch (t: Throwable) {
-        false
-    }
-
-    fun deviceAdminIntent(): Intent =
-        Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
-            .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminReceiver)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-    /** Screen that lists Smart Lock, Extend Unlock and trusted places. */
+    /** Smart Lock / Extend Unlock settings, for the setup hint. */
     fun smartLockIntent(): Intent =
-        Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-    fun lockScreenSettingsIntent(): Intent =
         Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     /** Turns the display on if it is off. The wake lock is time-boxed so it cannot leak. */
@@ -101,7 +69,6 @@ class ScreenControl @Inject constructor(@ApplicationContext private val context:
             )
             lock.setReferenceCounted(false)
             lock.acquire(holdMs)
-            AttemptLog.add("woke the screen (held ${holdMs}ms)")
             true
         } catch (t: Throwable) {
             Log.e(TAG, "wakeScreen failed", t)
@@ -111,18 +78,12 @@ class ScreenControl @Inject constructor(@ApplicationContext private val context:
     }
 
     /**
-     * Asks the platform to dismiss the keyguard and reports what actually happened.
-     *
-     * Uses the supported [KeyguardManager.requestDismissKeyguard] (API 26+) rather than the
-     * deprecated `KeyguardLock`, because only the new API understands a trusted state and can turn
-     * the screen on as part of the dismissal. The host activity performs the request; the outcome
-     * is then read from the real keyguard state rather than an activity result, which also covers
-     * the case where Smart Lock lets the phone unlock a moment later.
+     * Asks the platform to dismiss the keyguard. Succeeds for a non-secure lock or a trusted state.
      */
-    suspend fun requestKeyguardDismiss(): DismissOutcome {
-        val km = keyguardManager ?: return DismissOutcome.UNKNOWN
-        if (!km.isKeyguardLocked) return DismissOutcome.DISMISSED
-
+    suspend fun requestPlatformDismiss(): Boolean {
+        val km = keyguardManager ?: return false
+        if (!km.isKeyguardLocked) return true
+        if (km.isKeyguardSecure) return false
         val launched = try {
             context.startActivity(ToggleHostActivity.dismissIntent(context))
             true
@@ -130,18 +91,73 @@ class ScreenControl @Inject constructor(@ApplicationContext private val context:
             AttemptLog.add("could not start the keyguard host activity: ${t.message}")
             false
         }
-        if (!launched) return DismissOutcome.UNKNOWN
-
+        if (!launched) return false
         val deadline = System.currentTimeMillis() + DISMISS_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
-            delay(250)
-            if (!km.isKeyguardLocked) {
-                AttemptLog.add("keyguard dismissed (secure=${secureLockPresent()})")
-                return DismissOutcome.DISMISSED
-            }
+            delay(200)
+            if (!isDeviceLocked()) return true
         }
-        AttemptLog.add("keyguard still showing (secure=${secureLockPresent()}); a credential is needed")
-        return if (secureLockPresent()) DismissOutcome.SECURED else DismissOutcome.UNKNOWN
+        return false
+    }
+
+    /**
+     * One bounded attempt to unlock by driving the PIN pad.
+     *
+     * Returns true when the device is unlocked afterwards. Deliberately never loops: repeatedly
+     * submitting a credential risks Android's lockout and, on some devices, a secure wipe.
+     */
+    suspend fun unlockWithCredential(): Boolean {
+        if (!vault.isEnabled()) {
+            AttemptLog.add("auto unlock is switched off")
+            return false
+        }
+        val pin = vault.credential()
+        if (pin.isNullOrEmpty()) {
+            AttemptLog.add("auto unlock is enabled but no credential is stored")
+            return false
+        }
+        val automator = AccessibilityServiceHolder.service?.automator
+        if (automator == null) {
+            AttemptLog.add("auto unlock needs the accessibility service; it is not connected")
+            return false
+        }
+
+        val lastFailure = vault.lastFailedAttemptAt()
+        val sinceFailure = System.currentTimeMillis() - lastFailure
+        if (lastFailure > 0L && sinceFailure < KeyguardAutomator.LOCKOUT_GUARD_MS) {
+            AttemptLog.add(
+                "skipping unlock: a previous attempt failed ${sinceFailure / 1000}s ago " +
+                    "(guard is ${KeyguardAutomator.LOCKOUT_GUARD_MS / 1000}s to avoid a lockout)"
+            )
+            return false
+        }
+
+        return when (val outcome = automator.unlock(pin)) {
+            is KeyguardAutomator.Outcome.Unlocked -> {
+                AttemptLog.add("unlocked by entering the stored credential")
+                true
+            }
+            is KeyguardAutomator.Outcome.KeypadNotFound -> {
+                AttemptLog.add("the PIN pad was not found on the lock screen; not retrying")
+                vault.markFailedAttempt(System.currentTimeMillis())
+                false
+            }
+            is KeyguardAutomator.Outcome.DigitFailed -> {
+                AttemptLog.add("could not press '${outcome.digit}' on the PIN pad; not retrying")
+                vault.markFailedAttempt(System.currentTimeMillis())
+                false
+            }
+            is KeyguardAutomator.Outcome.StillLocked -> {
+                AttemptLog.add("the credential was entered but the device is still locked")
+                vault.markFailedAttempt(System.currentTimeMillis())
+                false
+            }
+            is KeyguardAutomator.Outcome.NotConfigured -> {
+                AttemptLog.add("no usable numeric credential is configured")
+                false
+            }
+            is KeyguardAutomator.Outcome.Backoff -> false
+        }
     }
 
     /**
@@ -158,37 +174,41 @@ class ScreenControl @Inject constructor(@ApplicationContext private val context:
         false
     }
 
-    /** Turns the screen off (and locks it) via the device administrator. */
-    fun lockNow(): Boolean {
-        val dpm = devicePolicyManager ?: return false
-        if (!hasDeviceAdmin()) {
-            AttemptLog.add("screen left on: device administrator is not enabled")
+    /**
+     * Locks the screen through the accessibility global action.
+     *
+     * This needs no device administrator and works from API 28, so it replaced one.
+     */
+    fun lockScreen(): Boolean {
+        val service = AccessibilityServiceHolder.service
+        if (service == null) {
+            AttemptLog.add("cannot lock the screen: the accessibility service is not connected")
             return false
         }
         return try {
-            dpm.lockNow()
-            AttemptLog.add("screen turned off via device admin")
-            true
+            val done = service.performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+            )
+            if (!done) {
+                AttemptLog.add("GLOBAL_ACTION_LOCK_SCREEN was rejected by the service")
+            }
+            done
         } catch (t: Throwable) {
-            Log.e(TAG, "lockNow failed", t)
-            AttemptLog.add("lockNow failed: ${t.message}")
+            Log.e(TAG, "lockScreen failed", t)
+            AttemptLog.add("lockScreen failed: ${t.message}")
             false
         }
     }
 
-    /** One-line snapshot for the diagnostics log. */
     fun capabilities(): String = buildString {
         append("interactive=").append(isInteractive())
-        append(" locked=").append(isLocked())
+        append(" deviceLocked=").append(isDeviceLocked())
         append(" secure=").append(secureLockPresent())
-        append(" autoUnlock=").append(autoUnlockPossible())
-        append(" deviceAdmin=").append(hasDeviceAdmin())
     }
 
     companion object {
         private const val TAG = "HSScreen"
         private const val DEFAULT_WAKE_HOLD_MS = 90_000L
-        private const val DISMISS_TIMEOUT_MS = 15_000L
+        private const val DISMISS_TIMEOUT_MS = 12_000L
     }
 }
-

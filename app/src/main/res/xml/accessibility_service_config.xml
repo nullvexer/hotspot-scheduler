@@ -1,17 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  flagReportViewIds is required to read switch_widget / switch_text by resource id.
-  flagRetrieveInteractiveWindows lets the service see which window is in the foreground.
+  NO android:packageNames filter.
 
-  Both Settings packages are listed: on some One UI builds the tethering and data screens resolve
-  under com.samsung.android.settings. Restricting the filter to only com.android.settings meant
-  onAccessibilityEvent never fired on those builds and every toggle logged "ignoring own window".
+  This is essential for unattended unlock. The previous config restricted events to
+  com.android.settings and com.samsung.android.settings, so the service never received anything
+  from the keyguard / SystemUI process and could not see the PIN keypad at all.
+
+  To bound the cost of an unfiltered service, HotspotAccessibilityService allowlists the packages
+  it cares about in code and ignores every other window.
+
+  canPerformGestures: required for dispatchGesture(), used to swipe the lock screen up to reveal
+  the PIN keypad and as a coordinate fallback when a keypad node refuses ACTION_CLICK.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
     android:description="@string/acc_service_description"
-    android:notificationTimeout="100"
-    android:packageNames="com.android.settings,com.samsung.android.settings" />
+    android:notificationTimeout="50" />

@@ -22,6 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -35,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -49,6 +51,9 @@ fun SetupScreen(
 val state by viewModel.state.collectAsState()
     val testRunning by viewModel.testRunning.collectAsState()
     val screenOffAfter by viewModel.screenOffAfter.collectAsState()
+    var pin by remember { mutableStateOf("") }
+    var statusText by remember { mutableStateOf<String?>(null) }
+    val pinValid = pin.isEmpty() || SetupViewModel.isPlausiblePin(pin)
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var diagnostics by remember { mutableStateOf(com.iranjan.hotspotscheduler.accessibility.AttemptLog.snapshot()) }
@@ -101,77 +106,85 @@ Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.head
             open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
 
-        // A secure lock is the one thing that makes unattended operation impossible, so it is
-        // called out separately and first among the blockers.
+        // Unattended unlock: the credential card, the keypad diagnostic, and the screen-off switch.
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        stringResource(R.string.lock_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f)
-                    )
-                    AssistChip(
-                        onClick = {},
-                        label = {
-                            Text(
-                                if (state.secureLock) "PIN / password" else "No credential",
-                                color = if (state.secureLock) {
-                                    MaterialTheme.colorScheme.error
-                                } else {
-                                    MaterialTheme.colorScheme.primary
-                                }
-                            )
-                        }
-                    )
-                }
+                Text(
+                    stringResource(R.string.unlock_title),
+                    style = MaterialTheme.typography.titleMedium
+                )
                 Text(
                     stringResource(
-                        if (state.secureLock) R.string.lock_secure_warning else R.string.lock_no_credential
+                        when {
+                            !state.secureLock -> R.string.unlock_none_needed
+                            state.autoUnlockEnabled && state.pinStored -> R.string.unlock_pin_label
+                            state.autoUnlockEnabled -> R.string.unlock_platform_only
+                            else -> R.string.unlock_pin_needed
+                        }
                     ),
                     style = MaterialTheme.typography.bodyMedium
                 )
-                if (state.secureLock) {
-                    Button(onClick = { open(viewModel.lockScreenSettingsIntent()) }) {
-                        Text(stringResource(R.string.lock_remove))
-                    }
-                }
-            }
-        }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+if (state.secureLock) {
+                    OutlinedTextField(
+                        value = pin,
+                        onValueChange = { v -> pin = v.filter { it.isDigit() }.take(SetupViewModel.PIN_MAX) },
+                        label = { Text(stringResource(R.string.unlock_pin_label)) },
+                        singleLine = true,
+                        isError = !pinValid,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (!pinValid) {
+                        Text(
+                            stringResource(R.string.unlock_pin_bad),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                     Text(
-                        stringResource(R.string.device_admin_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f)
+                        stringResource(R.string.unlock_pin_hint),
+                        style = MaterialTheme.typography.bodySmall
                     )
-                    AssistChip(
-                        onClick = {},
-                        label = {
-                            Text(
-                                if (state.deviceAdmin) "On" else "Off",
-                                color = if (state.deviceAdmin) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.error
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                val toSave = pin
+viewModel.savePin(toSave) { ok ->
+                                    pin = ""
+                                    statusText = if (ok) {
+                                        context.getString(R.string.unlock_pin_saved)
+                                    } else {
+                                        context.getString(R.string.export_failed_toast)
+                                    }
                                 }
-                            )
+                            },
+                            enabled = pin.isNotEmpty() && SetupViewModel.isPlausiblePin(pin)
+                        ) {
+                            Text(stringResource(R.string.unlock_pin_store))
                         }
+                        if (state.pinStored) {
+                            OutlinedButton(onClick = {
+viewModel.clearPin()
+                                statusText = context.getString(R.string.unlock_pin_cleared)
+                            }) {
+                                Text(stringResource(R.string.unlock_pin_clear))
+                            }
+                        }
+                    }
+                    Text(
+                        stringResource(R.string.unlock_warning),
+                        style = MaterialTheme.typography.bodySmall
                     )
-                }
-                Text(stringResource(R.string.device_admin_desc), style = MaterialTheme.typography.bodyMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!state.deviceAdmin) {
-                        Button(onClick = { open(viewModel.deviceAdminIntent()) }) {
-                            Text(stringResource(R.string.device_admin_enable))
-                        }
-                    }
-                    OutlinedButton(onClick = { viewModel.refresh() }) {
-                        Text(stringResource(R.string.setup_open))
+OutlinedButton(onClick = { viewModel.diagnoseKeypad() }) {
+                        Text(stringResource(R.string.unlock_diagnose_run))
                     }
                 }
+
+                statusText?.let { message ->
+                    Text(message, style = MaterialTheme.typography.bodyMedium)
+                }
+
                 Row(
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -182,6 +195,7 @@ Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.head
                     )
                     Text(stringResource(R.string.screen_off_after), style = MaterialTheme.typography.bodyMedium)
                 }
+                Text(stringResource(R.string.screen_off_note), style = MaterialTheme.typography.bodySmall)
             }
         }
 

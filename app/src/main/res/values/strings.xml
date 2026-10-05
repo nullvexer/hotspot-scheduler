@@ -64,24 +64,28 @@
     <string name="engine_status_missing">Accessibility service is OFF — required</string>
     <string name="engine_open">Open accessibility settings</string>
 
-    <string name="lock_title">Unattended unlock</string>
-    <string name="lock_secure_warning">Your screen lock uses a PIN, pattern or password. For hands-free operation, turn on Smart Lock or Extend Unlock — the app then unlocks by itself whenever the phone is trusted. Until then it wakes the screen and waits for you.</string>
-    <string name="lock_no_credential">No PIN, pattern or password is set. The app unlocks the phone by itself — fully hands-free.</string>
-    <string name="lock_swipe_only">Only a swipe lock is set, so the app dismisses it by itself.</string>
-    <string name="lock_remove">Open Smart Lock settings</string>
-
-    <string name="device_admin_title">Turn the screen off afterwards</string>
-    <string name="device_admin_desc">Grants one permission only: force-lock, used to put the screen back to sleep after a scheduled change. This is the only way an app can turn the screen off. No passwords, cameras or factory reset are affected.</string>
-    <string name="device_admin_status_ready">Device administrator is on — the app can turn the screen off</string>
-    <string name="device_admin_status_missing">Not enabled — the screen will stay on after a change</string>
-    <string name="device_admin_enable">Enable device administrator</string>
-    <string name="device_admin_label">Hotspot Scheduler</string>
-    <string name="device_admin_description">Allows Hotspot Scheduler to lock the screen after a scheduled hotspot or mobile data change. This is the only permission it requests.</string>
-
+<string name="unlock_title">Unattended unlock</string>
+    <string name="unlock_none_needed">No PIN, pattern or password is set — the app unlocks the phone by itself.</string>
+    <string name="unlock_platform_only">Smart Lock / Extend Unlock handles it — the app asks the platform to dismiss the keyguard, so no PIN needs to be stored.</string>
+    <string name="unlock_pin_needed">A PIN is set. Store it here (digits only) and the app will tap it on the lock screen keypad so scheduled changes run hands-free.</string>
+    <string name="unlock_pin_label">Lock screen PIN</string>
+    <string name="unlock_pin_hint">Digits only. Stored encrypted in the Android Keystore, never logged, never exported.</string>
+    <string name="unlock_pin_bad">Enter 4–10 digits.</string>
+    <string name="unlock_pin_saved">PIN saved. The app will unlock by itself.</string>
+    <string name="unlock_pin_cleared">PIN removed. Unattended unlock needs Smart Lock or a PIN.</string>
+    <string name="unlock_pin_store">Save PIN</string>
+    <string name="unlock_pin_clear">Remove PIN</string>
+    <string name="unlock_enable">Unattended unlock</string>
+    <string name="unlock_warning">Android counts wrong PIN attempts. The app tries once per scheduled change and then waits for 5 minutes before trying again, so a flaky automation can never lock the phone. If the phone has just rebooted, unlock it once by hand so the app can read its encrypted settings.</string>
+    <string name="unlock_diagnose">Check the lock screen keypad</string>
+    <string name="unlock_diagnose_hint">Reports which keypad buttons were found, so a One UI change can be accommodated without guessing.</string>
+    <string name="unlock_diagnose_run">Diagnose keypad</string>
+    <string name="unlock_smartlock">Open Smart Lock settings</string>
     <string name="screen_off_after">Put the screen back to sleep after a change</string>
+    <string name="screen_off_note">Uses the accessibility service to lock the phone — no extra permission needed.</string>
     <string name="notif_unlock_required_title">Unlock the phone to finish this change</string>
-    <string name="notif_unlock_required_text">The phone is locked with a PIN or password, so it needs unlocking before the hotspot can change. The screen stays on for two minutes. To let the app unlock by itself, turn on Smart Lock or Extend Unlock under Settings → Lock screen.</string>
-    <string name="notif_unlock_required_action">How to set it up</string>
+    <string name="notif_unlock_required_text">The phone is locked with a PIN the app could not enter, so this change did not happen. The screen stays on for 90 seconds. Check Setup → Diagnostics for why.</string>
+    <string name="notif_unlock_required_action">Open setup</string>
 
     <string name="calib_title">Calibration</string>
     <string name="calib_mode_on">Scanning ON — open Settings → Connections → Mobile Hotspot and Tethering now.</string>

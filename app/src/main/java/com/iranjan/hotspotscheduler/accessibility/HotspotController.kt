@@ -116,7 +116,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         }
     }
 
-    private suspend fun runToggleInner(
+private suspend fun runToggleInner(
         rowKeyword: String,
         targetOn: Boolean,
         useCalibration: Boolean,
@@ -127,17 +127,12 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         // Stage 0: the switch may already be on screen (app left in Settings, user is awake).
         settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
-// Stage 1: wake the screen and ask the platform to clear the keyguard. A trusted state
-        // (Smart Lock / Extend Unlock / trusted places) clears here with no user interaction.
+        // Stage 1: wake the screen and get the phone unlocked.
         screen.wakeScreen(WAKE_HOLD_MS)
-        screen.requestKeyguardDismiss()
-        delay(SETTLE_DELAY_MS)
-        settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+        ensureUnlocked()
 
-        // Stage 2: launch Settings and navigate. Background activity starts are restricted, so the
-        // launch goes through the foreground host activity.
-        screen.wakeScreen(WAKE_HOLD_MS)
-        if (!screen.isLocked()) {
+        // Stage 2: launch Settings and navigate.
+        if (!screen.isDeviceLocked()) {
             launchFor(rowKeyword)
             awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
             settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
@@ -147,55 +142,72 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             return ToggleResult.FAILED
         }
 
-        // Stage 3: waiting on the keyguard.
-        return awaitUnlock(rowKeyword, targetOn, useCalibration, password)
+        // Stage 3: still locked after unlocking was attempted - wait for the person.
+        return awaitManualUnlock(rowKeyword, targetOn, useCalibration, password)
     }
 
-/**
-     * The screen is locked. A trusted state (Smart Lock, Extend Unlock / trusted places) is
-     * dismissed immediately and without user interaction; otherwise the platform puts the
-     * credential UI up and we wait, re-requesting because Smart Lock can become trusted at any
-     * moment during the window.
+    /**
+     * Brings the phone from locked to unlocked, in escalating order:
+     *  1. platform dismissal, which covers a swipe lock and any trusted state (Smart Lock,
+     *     Extend Unlock, trusted places) with no interaction at all;
+     *  2. one bounded attempt at the PIN pad through the accessibility service.
+     *
+     * Leaves the phone untouched if neither works; the caller then falls back to waiting for the
+     * person. Never loops: repeated credential submissions risk an Android lockout.
      */
-    private suspend fun awaitUnlock(
+    private suspend fun ensureUnlocked() {
+        if (!screen.isDeviceLocked()) return
+
+        if (screen.requestPlatformDismiss()) {
+            AttemptLog.add("keyguard dismissed by the platform (trusted or non-secure)")
+            delay(SETTLE_DELAY_MS)
+            return
+        }
+
+        if (screen.unlockWithCredential()) {
+            AttemptLog.add("unlocked by entering the stored credential")
+            delay(SETTLE_DELAY_MS)
+            return
+        }
+
+        AttemptLog.add("automated unlock did not succeed; will wait for the user")
+    }
+
+    /**
+     * Last resort: the phone needs a person. Wakes it, tells them once, and waits.
+     *
+     * A PIN failure is never retried inside the window: Android counts wrong credential attempts
+     * and can lock the device or wipe it, so a flaky automation bug must not become a lockout.
+     */
+    private suspend fun awaitManualUnlock(
         rowKeyword: String,
         targetOn: Boolean,
         useCalibration: Boolean,
         password: String?
     ): ToggleResult {
-        val deadline = System.currentTimeMillis() + UNLOCK_WAIT_MS
-        var requested = false
+        AttemptLog.add("waiting up to ${MANUAL_WAIT_MS / 1000}s for the phone to be unlocked")
+        notifications.notifyUnlockRequired()
+        val deadline = System.currentTimeMillis() + MANUAL_WAIT_MS
         var announced = false
         while (System.currentTimeMillis() < deadline) {
-            screen.wakeScreen(WAKE_HOLD_MS)
-            when (screen.requestKeyguardDismiss()) {
-                ScreenControl.DismissOutcome.DISMISSED -> {
-                    AttemptLog.add("keyguard cleared; resuming automation")
-                    launchFor(rowKeyword)
-                    awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
-                    settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-                    navigateFor(rowKeyword, useCalibration)
-                    settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-                    return ToggleResult.FAILED
-                }
-                ScreenControl.DismissOutcome.SECURED -> {
-                    requested = true
-                    if (!announced) {
-                        // Tell the user once, and tell them the thing that actually helps.
-                        AttemptLog.add(
-                            "a credential is required to unlock; notifying the user once and " +
-                                "keeping the phone awake"
-                        )
-                        notifications.notifyUnlockRequired()
-                        announced = true
-                    }
-                }
-                ScreenControl.DismissOutcome.UNKNOWN -> requested = true
+            if (!screen.isDeviceLocked()) {
+                AttemptLog.add("unlocked; resuming automation")
+                launchFor(rowKeyword)
+                awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
+                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+                navigateFor(rowKeyword, useCalibration)
+                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+                return ToggleResult.FAILED
             }
-            delay(500)
+            screen.wakeScreen(WAKE_HOLD_MS)
+            if (!announced) {
+                announced = true
+                AttemptLog.add("notified the user that a credential is needed")
+            }
+            delay(1000)
         }
-        AttemptLog.add("still locked after ${UNLOCK_WAIT_MS / 1000}s (requested=$requested)")
-        return if (requested) ToggleResult.BLOCKED else ToggleResult.FAILED
+        AttemptLog.add("still locked after ${MANUAL_WAIT_MS / 1000}s")
+        return ToggleResult.BLOCKED
     }
 
     /** Only a definitive result stops the ladder; FAILED means "try the next stage". */
@@ -205,18 +217,19 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             else -> result
         }
 
-    /**
+/**
      * Restores the screen afterwards: turns it back off if we turned it on, unless the user is
      * actively using the phone or the toggle failed and the screen is still needed.
+     *
+     * Uses the accessibility global action, so no device administrator is required.
      */
     private suspend fun settleScreen() {
         if (!turnScreenOffAfterToggle) return
         delay(POST_TOGGLE_SETTLE_MS)
         when {
             !screen.isInteractive() -> Unit
-            screen.isLocked() -> Unit
-            !screen.lockNow() -> AttemptLog.add("screen left on: device administrator is not enabled")
-            else -> delay(POST_LOCK_SETTLE_MS)
+            screen.isDeviceLocked() -> Unit
+            screen.lockScreen() -> delay(POST_LOCK_SETTLE_MS)
         }
     }
 
@@ -435,7 +448,7 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
         private const val STATE_TIMEOUT_MS = 3_000L
         private const val SCREEN_WAIT_MS = 6_000L
         private const val CONFIG_WAIT_MS = 6_000L
-private const val UNLOCK_WAIT_MS = 150_000L
+private const val MANUAL_WAIT_MS = 90_000L
         private const val TOTAL_TIMEOUT_MS = 180_000L
         private const val WAKE_HOLD_MS = 120_000L
         private const val SETTLE_DELAY_MS = 1_200L

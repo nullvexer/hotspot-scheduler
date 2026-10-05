@@ -1,4 +1,4 @@
-﻿package com.iranjan.hotspotscheduler.ui.setup
+package com.iranjan.hotspotscheduler.ui.setup
 
 import android.Manifest
 import android.app.AlarmManager
@@ -15,9 +15,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.iranjan.hotspotscheduler.accessibility.AttemptLog
 import com.iranjan.hotspotscheduler.accessibility.HotspotController
+import com.iranjan.hotspotscheduler.accessibility.KeyguardAutomator
 import com.iranjan.hotspotscheduler.accessibility.ScreenControl
 import com.iranjan.hotspotscheduler.data.repo.RoutineRepository
 import com.iranjan.hotspotscheduler.util.AccessibilityUtils
+import com.iranjan.hotspotscheduler.util.LockCredentialVault
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,11 +34,16 @@ data class SetupState(
     val exactAlarms: Boolean = false,
     val battery: Boolean = false,
     val overlay: Boolean = false,
-    val deviceAdmin: Boolean = false,
-    val secureLock: Boolean = false
+    val secureLock: Boolean = false,
+    val autoUnlockEnabled: Boolean = false,
+    val pinStored: Boolean = false
 ) {
-    /** Everything the app needs in order to run unattended. */
-    val automationReady: Boolean get() = accessibility && !secureLock && deviceAdmin
+    /**
+     * True when a scheduled toggle can run with nobody touching the phone: the accessibility
+     * service is on, and either there is no credential or auto-unlock is enabled.
+     */
+    val unattendedReady: Boolean
+        get() = accessibility && (!secureLock || autoUnlockEnabled)
 }
 
 @HiltViewModel
@@ -44,7 +51,8 @@ class SetupViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val controller: HotspotController,
     private val repo: RoutineRepository,
-    private val screen: ScreenControl
+    private val screen: ScreenControl,
+    private val vault: LockCredentialVault
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SetupState())
@@ -60,7 +68,11 @@ class SetupViewModel @Inject constructor(
         refresh()
     }
 
-    fun refresh() {
+    /**
+     * Re-reads every permission/state flag. Launched rather than synchronous because reading the
+     * stored PIN flags touches disk, and this runs on every ON_RESUME.
+     */
+    fun refresh() = viewModelScope.launch {
         val alarmManager = context.getSystemService(AlarmManager::class.java)
         val state = SetupState(
             accessibility = AccessibilityUtils.isServiceEnabled(context),
@@ -69,25 +81,62 @@ class SetupViewModel @Inject constructor(
             exactAlarms = Build.VERSION.SDK_INT < 31 || alarmManager?.canScheduleExactAlarms() == true,
             battery = isIgnoringBattery(),
             overlay = Settings.canDrawOverlays(context),
-            deviceAdmin = screen.hasDeviceAdmin(),
-            secureLock = screen.secureLockPresent()
+            secureLock = screen.secureLockPresent(),
+            autoUnlockEnabled = vault.isEnabled(),
+            pinStored = vault.isConfigured()
         )
         _state.value = state
-        if (state.automationReady) {
-            AttemptLog.add("setup: ready for unattended operation; ${screen.capabilities()}")
-        } else {
-            val missing = buildList {
-                if (!state.accessibility) add("accessibility service")
-                if (state.secureLock) add("no secure lock (PIN/pattern/password)")
-                if (!state.deviceAdmin) add("device administrator for screen-off")
+        AttemptLog.add(
+            if (state.unattendedReady) {
+                "setup: ready for unattended operation; ${screen.capabilities()}"
+            } else {
+                val missing = buildList {
+                    if (!state.accessibility) add("accessibility service")
+                    if (state.secureLock && !state.autoUnlockEnabled) add("a stored lock-screen PIN")
+                }
+                "setup: not unattended yet, missing: ${missing.joinToString()}"
             }
-            AttemptLog.add("setup: not unattended yet, missing: ${missing.joinToString()}")
-        }
+        )
     }
 
-    fun deviceAdminIntent(): Intent = screen.deviceAdminIntent()
+    fun smartLockIntent(): Intent = screen.smartLockIntent()
 
-    fun lockScreenSettingsIntent(): Intent = screen.lockScreenSettingsIntent()
+    /** Stores the lock-screen PIN for unattended unlock. Digits only. */
+    fun savePin(pin: String, onDone: (Boolean) -> Unit) = viewModelScope.launch {
+        val ok = vault.store(pin)
+        if (ok) {
+            AttemptLog.add("lock-screen PIN saved for unattended unlock")
+        }
+        refresh()
+        onDone(ok)
+    }
+
+    fun clearPin() = viewModelScope.launch {
+        vault.clear()
+        refresh()
+    }
+
+    fun setAutoUnlockEnabled(enabled: Boolean) = viewModelScope.launch {
+        vault.setEnabled(enabled)
+        AttemptLog.add("auto unlock enabled = $enabled")
+        refresh()
+    }
+
+    /**
+     * Reports which keypad buttons the accessibility service can actually see right now. This is
+     * how a One UI change gets accommodated: run it on the lock screen, read the log, and adjust
+     * [KeyguardIds] if the ids differ. Nothing is entered.
+     */
+    fun diagnoseKeypad() = viewModelScope.launch {
+        val automator = com.iranjan.hotspotscheduler.accessibility.AccessibilityServiceHolder.service?.automator
+        if (automator == null) {
+            AttemptLog.add("keypad diagnose: the accessibility service is not connected")
+            return@launch
+        }
+        screen.wakeScreen()
+        val found = automator.diagnoseKeypad()
+        AttemptLog.add("keypad diagnose: $found")
+    }
 
     fun setScreenOffAfter(enabled: Boolean) {
         _screenOffAfter.value = enabled
@@ -144,5 +193,14 @@ class SetupViewModel @Inject constructor(
             ?.isIgnoringBatteryOptimizations(context.packageName) == true
     } catch (t: Throwable) {
         false
+    }
+
+    companion object {
+        /** Android's own keyguard UI only accepts a short numeric PIN. */
+        const val PIN_MIN = 4
+        const val PIN_MAX = 10
+
+        fun isPlausiblePin(pin: String): Boolean =
+            pin.length in PIN_MIN..PIN_MAX && pin.all { it.isDigit() }
     }
 }

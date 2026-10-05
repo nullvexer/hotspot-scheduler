@@ -10,13 +10,12 @@ no root.
 
 ## What a scheduled toggle does
 
-1. **Turns the screen on** — a `SCREEN_BRIGHT_WAKE_LOCK` with `ACQUIRE_CAUSES_WAKEUP`.
-2. **Unlocks the phone** — `KeyguardManager.requestDismissKeyguard()`, driven from a transparent
-   host activity (the API requires one). See the lock-screen section for exactly when this succeeds.
+1. **Turns the screen on** — a `SCREEN_BRIGHT_WAKE_LOCK` with `ACQUIRE_CAUSES_WAKEUP`, plus a
+   transparent host activity with `setTurnScreenOn(true)` / `setShowWhenLocked(true)`.
+2. **Unlocks the phone**, escalating — see below.
 3. **Opens the right Settings screen** and navigates to the switch if it is not already up.
 4. **Reads the switch state, clicks it, then reads it again** to confirm. One retry on failure.
-5. **Turns the screen back off** via the device administrator, unless the user was already using
-   the phone or the toggle failed while the screen is still needed.
+5. **Locks the screen again** via `AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN`.
 
 Matching is safety-gated at every step: a switch is only clicked when its row text positively
 matches ("Mobile Hotspot" / "Mobile data"), unrelated rows (Bluetooth, Data saver, Roaming) are
@@ -25,45 +24,66 @@ saved calibration is treated as a hint rather than an override.
 
 ## Unattended unlock
 
-This is the part worth understanding, because it decides whether the app can run on its own at 3am.
+There is no Android API that accepts a credential — `KeyguardManager` cannot do it, and
+`DevicePolicyManager.setKeyguardDisabled` is blocked on a device with a secure credential. But the
+PIN pad is ordinary UI: AOSP's keyguard exposes real buttons (`key0`…`key9`, `key_enter`), and
+clicking one appends the digit to the real credential field. That is the same action a person
+performs, and it is what Tasker/AutoInput automate.
 
-The app uses the officially supported `KeyguardManager.requestDismissKeyguard()`. Google's own
-documentation for it states:
+So the unlock engine escalates:
 
-> "If the Keyguard is not secure **or the device is currently in a trusted state**, calling this
-> method will immediately dismiss the Keyguard **without any user interaction**. If the Keyguard is
-> secure **and the device is not in a trusted state**, this will bring up the UI so the user can
-> enter their credentials."
+1. **Already unlocked** → nothing to do.
+2. **Platform dismissal** — `KeyguardManager.requestDismissKeyguard()`. Its documented contract:
+   a non-secure keyguard, *or a device in a trusted state*, is dismissed immediately with no user
+   interaction. A trusted state is Smart Lock, Extend Unlock, or trusted places.
+3. **The PIN pad** — `KeyguardAutomator` drives the lock screen keypad. Digits are located by
+   **resource id**, never by visible text, because AOSP attaches `ObscureSpeechDelegate` to the
+   keys so the spoken digit is suppressed. Ids tried per digit, in order:
+   `com.android.keyguard:id/key{N}`, `com.android.systemui:id/key{N}`,
+   `com.android.systemui:id/numpad_key{N}`, `com.android.samsung:id/key{N}` — the same key is
+   `com.android.systemui:id/key1` on some Android 13 builds and `com.android.keyguard:id/key1` on
+   others, so the resolver tries all four.
+4. **Gesture fallback** — if a node exists but refuses `ACTION_CLICK`, a `dispatchGesture` tap is
+   sent to its centre. If no node is found at all, a calibrated 4×3 grid position is used.
+5. **Manual wait** — keeps the screen awake and finishes the moment the phone is unlocked.
 
-That "trusted state" is the whole game. It is what Smart Lock, Extend Unlock and trusted places
-create. So:
+### Failure discipline
 
-| Lock screen | Unattended? |
-|---|---|
-| No PIN, pattern or password | Yes — not secure, dismissed instantly |
-| Swipe-only | Yes — not secure, dismissed instantly |
-| PIN/pattern/password **+ Smart Lock / Extend Unlock active** | Yes — trusted state, dismissed instantly, no interaction |
-| PIN/pattern/password, not trusted | The platform raises the credential screen; the app keeps the phone awake and finishes as soon as you unlock |
+This is the part that matters most. Android counts wrong credential attempts, and some devices
+wipe on too many. So:
 
-There is deliberately **no PIN-injection code** in this app. The keyguard is not an accessibility
-window and accepts no injected text, so such code would not work on Android 13 — and it is exactly
-the technique malware uses to steal PINs, which would put your phone's own password inside a
-third-party app. The app asks the platform to unlock and reports honestly what happened.
+- **One attempt per scheduled change.** There is no `while (isLocked) enterPin()` loop anywhere.
+- **A 5-minute backoff** after any failure, recorded in the vault. A flaky automation bug becomes
+  a controlled failure instead of a lockout machine.
+- **Every outcome is distinct** — `Unlocked`, `KeypadNotFound`, `DigitFailed`, `StillLocked`,
+  `NotConfigured`, `Backoff` — and each is logged with its own reason.
+- The keypad is only re-swiped if it is *not already visible*; a blind swipe can dismiss a bouncer
+  that was about to accept input.
+- Verification uses `KeyguardManager.isDeviceLocked()`, the authoritative "needs authentication"
+  check, rather than `isKeyguardLocked()`, which also reports true for a swipe-only lock.
 
-**To get hands-free operation while keeping a PIN**, do one of these:
+### Diagnosing a ROM change
 
-- **Extend Unlock → Trusted places** — Settings → Lock screen → Extend Unlock → Trusted places, add
-  home. The phone stays unlocked at home and keeps your PIN everywhere else.
-- **Smart Lock** — Settings → Lock screen → Smart Lock: *On-body detection* or *Trusted places*.
-- Remove the lock credential entirely.
+Keypad ids change between One UI versions. Setup has **Diagnose keypad**, which wakes the screen and
+reports which key ids are actually reachable, without entering anything. Run it on the lock screen
+and read the log; the output tells you exactly which id form your phone uses, so `KeyguardIds` can
+be extended instead of guessed.
 
-The app re-checks on every toggle, because Smart Lock can flip to trusted at any moment (you walk
-in with the phone, your home Wi-Fi appears). Setup shows the current state and links straight to
-those settings.
+### Where the PIN lives
 
-Turning the screen **off** requires device administrator, because `DevicePolicyManager.lockNow()` is
-the only public API for it. The app requests exactly one policy capability: `force-lock`. No
-password policies, no wipe, no camera disable.
+The PIN is stored **encrypted with an Android Keystore AES-GCM key** (the same primitive as the
+hotspot passwords), and it is **never logged and never exported** — the diagnostics log records only
+the length, and export/import omits it.
+
+It is written to **device-protected (DE) storage**, not normal app storage. This matters: normal app
+storage is credential-encrypted and is unavailable until the phone has been unlocked once since boot,
+so a 5am routine after a reboot could not otherwise read its own credential. DE storage is available
+that early. The one remaining constraint is that a *reboot* still requires you to unlock once by
+hand before the automation can act, which the Setup card states plainly.
+
+Turning the screen **off** needs no extra permission: `GLOBAL_ACTION_LOCK_SCREEN` (API 28+) replaced
+the Device Administrator that an earlier version required, and the `BIND_DEVICE_ADMIN` permission,
+the admin receiver and the policy XML are all gone.
 
 ## Safety invariants
 
