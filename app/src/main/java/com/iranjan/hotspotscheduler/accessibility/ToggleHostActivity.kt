@@ -50,10 +50,21 @@ class ToggleHostActivity : ComponentActivity() {
         if (handled) return
         handled = true
         when (intent?.getStringExtra(EXTRA_ACTION)) {
+            ACTION_WAKE -> wakeOnly()
             ACTION_DISMISS_KEYGUARD -> dismissKeyguard()
             ACTION_LAUNCH -> launchTarget()
             else -> finish()
         }
+    }
+
+    /**
+     * Pure wake. Resuming this activity with setTurnScreenOn(true) is the documented way to bring
+     * the display up, and it works whether or not a secure keyguard is present - which the wake
+     * lock path alone does not guarantee on every OEM build.
+     */
+    private fun wakeOnly() {
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.decorView.postDelayed({ if (!isFinishing) finish() }, WAKE_LINGER_MS)
     }
 
     private fun dismissKeyguard() {
@@ -100,7 +111,16 @@ class ToggleHostActivity : ComponentActivity() {
         const val EXTRA_TARGET_CLASS = "target_class"
         const val ACTION_DISMISS_KEYGUARD = "dismiss_keyguard"
         const val ACTION_LAUNCH = "launch"
+        const val ACTION_WAKE = "wake"
         private const val DISMISS_WATCHDOG_MS = 12_000L
+
+        /** Stay visible briefly so the display actually comes up before we finish. */
+        private const val WAKE_LINGER_MS = 1_200L
+
+        fun wakeIntent(context: android.content.Context): Intent =
+            Intent(context, ToggleHostActivity::class.java)
+                .putExtra(EXTRA_ACTION, ACTION_WAKE)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
 
         fun dismissIntent(context: android.content.Context): Intent =
             Intent(context, ToggleHostActivity::class.java)

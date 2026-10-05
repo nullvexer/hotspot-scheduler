@@ -220,20 +220,38 @@ class KeyguardAutomator(private val service: AccessibilityService) {
      * Reports which keypad buttons are reachable right now, without entering anything.
      *
      * This exists because the keypad ids vary by ROM and by One UI version. Rather than guessing
-     * after a failure, run this on the lock screen from Setup and read the log: the output shows
-     * exactly which id form this phone uses, so [KeyguardIds] can be extended instead of guessed.
+     * after a failure, run this from Setup and read the log: the output shows exactly which id form
+     * this phone uses, so [KeyguardIds] can be extended instead of guessed.
+     *
+     * Crucially it **reveals the keypad first**. Scanning without doing that reports 0/10 on the
+     * Samsung lockscreen's initial widget page, which looks like a failure when it just means the
+     * bouncer had not been raised yet. No credential digits are ever entered here.
      */
-    fun diagnoseKeypad(): String {
-        val ids = (0..9).flatMap { KeyguardIds.digitCandidates(it) }
-        val found = ids.filter { findFirst(listOf(it)) != null }
-        val packageName = runCatching { rootPackage() }.getOrNull()
-        val markerFound = KeyguardIds.bouncerMarkers().filter { findFirst(listOf(it)) != null }
+    suspend fun diagnoseKeypad(): String {
+        val packageBefore = runCatching { rootPackage() }.getOrNull()
+        val wasVisible = keypadPresent()
+
+        val revealed = if (wasVisible) {
+            "already visible"
+        } else if (revealKeypad()) {
+            "revealed by swipe"
+        } else {
+            "could not be revealed by swipe"
+        }
+        val visibleAfter = keypadPresent()
+
+        val found = (0..9).flatMap { KeyguardIds.digitCandidates(it) }.filter { findFirst(listOf(it)) != null }
+        val markers = KeyguardIds.bouncerMarkers().filter { findFirst(listOf(it)) != null }
+        val enter = KeyguardIds.enterCandidates().filter { findFirst(listOf(it)) != null }
+
         return buildString {
-            append("window=").append(packageName)
-            append(" keypadVisible=").append(keypadPresent())
-            append(" markerIds=").append(markerFound.ifEmpty { listOf("none") })
-            append(" digitsFound=").append(found.size).append("/10")
-            append(" ids=").append(found.ifEmpty { listOf("none") })
+            append("window=").append(runCatching { rootPackage() }.getOrNull() ?: packageBefore)
+            append("; keypad ").append(revealed)
+            append("; keypadVisible=").append(visibleAfter)
+            append("; markerIds=").append(markers.ifEmpty { listOf("none") })
+            append("; digits=").append(found.size).append("/10")
+            append("; enterIds=").append(enter.ifEmpty { listOf("none") })
+            append("; ids=").append(found.ifEmpty { listOf("none") })
         }
     }
 

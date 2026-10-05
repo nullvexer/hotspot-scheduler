@@ -171,12 +171,17 @@ class HotspotAutomationService : LifecycleService() {
                 val bytes = usage.bytes
                 if (bytes >= capMb * 1024L * 1024L) {
                     prefs.setCapHitEpochDay(today)
-                    val result = controller.setHotspotState(false)
+                    val result = controller.executeBoundary(
+                        hotspotOn = false,
+                        mobileDataTarget = null,
+                        password = null
+                    )
                     notifications.notifyCapReached(
                         Formatters.formatBytes(bytes),
                         Formatters.formatCapMb(capMb),
-                        result == ToggleResult.FAILED
+                        result.hotspot == ToggleResult.FAILED
                     )
+                    AttemptLog.add("cap reached -> ${result.summary}")
                     Log.i(TAG, "cap reached usage=$bytes capMb=$capMb result=$result")
                 }
             }
@@ -227,11 +232,22 @@ class HotspotAutomationService : LifecycleService() {
             prefs.setLastAppliedBoundary(boundaryKey)
             return
         }
-        val result = controller.setHotspotState(target)
-        if (result == ToggleResult.FAILED) notifications.notifyToggleFailed()
+        val result = controller.executeBoundary(
+            hotspotOn = target,
+            mobileDataTarget = null,
+            password = null
+        )
+        reportTransaction("long-gap reconcile", result)
         prefs.setLastAppliedBoundary(boundaryKey)
     }
 
+    /**
+     * Applies one scheduled boundary as a SINGLE transaction.
+     *
+     * Hotspot and mobile data are two steps of the same unattended job, not two jobs. Passing them
+     * separately made the controller lock the phone between them, so the second step always ran
+     * against a locked screen.
+     */
     private suspend fun applyBoundary(
         boundary: RoutineEvaluator.Boundary,
         paused: Boolean,
@@ -243,36 +259,51 @@ class HotspotAutomationService : LifecycleService() {
         val routine = repo.routine(boundary.routineId)
         if (boundary.isStart) {
             prefs.setSuppressedUntilNextWindow(false)
-            val freshCapHit = prefs.capHitEpochDay.first() == RoutineEvaluator.todayEpochDay(System.currentTimeMillis())
-            if (!paused && !freshCapHit && (capMb == null || usageBytes < capMb * 1024L * 1024L)) {
-                val result = controller.setHotspotState(true, routine?.hotspotPassword)
-                if (result == ToggleResult.FAILED) notifications.notifyToggleFailed()
-                Log.i(TAG, "boundary START applied result=$result routine=${routine?.name}")
-                if (routine?.mobileData == true) {
-                    val md = controller.setMobileData(true)
-                    Log.i(TAG, "mobile data ON at window start result=$md")
-                }
-            } else {
+            val today = RoutineEvaluator.todayEpochDay(System.currentTimeMillis())
+            val freshCapHit = prefs.capHitEpochDay.first() == today
+            val allowed = !paused && !freshCapHit && (capMb == null || usageBytes < capMb * 1024L * 1024L)
+            if (!allowed) {
                 Log.i(TAG, "boundary START skipped paused=$paused capHit=$freshCapHit capMb=$capMb usage=$usageBytes")
+                prefs.setLastAppliedBoundary(boundary.key)
+                return
             }
+            val result = controller.executeBoundary(
+                hotspotOn = true,
+                mobileDataTarget = if (routine?.mobileData == true) true else null,
+                password = routine?.hotspotPassword
+            )
+            reportTransaction("START '${routine?.name}'", result)
         } else {
-            val result = controller.setHotspotState(false)
-            if (result == ToggleResult.FAILED) notifications.notifyToggleFailed()
-            Log.i(TAG, "boundary END applied result=$result routine=${routine?.name}")
-            if (routine?.mobileData == true) {
-                val others = RoutineEvaluator.activeRoutines(
+            // Only another active routine that wants data keeps it on.
+            val othersNeedData = routine?.mobileData == true &&
+                RoutineEvaluator.activeRoutines(
                     repo.enabledRoutines().filter { it.id != routine.id },
                     System.currentTimeMillis()
                 ).any { it.mobileData }
-                if (!others) {
-                    val md = controller.setMobileData(false)
-                    Log.i(TAG, "mobile data OFF at window end (no other routines need it) result=$md")
-                } else {
-                    Log.i(TAG, "mobile data kept ON: another active routine uses it")
-                }
+            val dataTarget: Boolean? = when {
+                routine?.mobileData != true -> null
+                othersNeedData -> null
+                else -> false
             }
+            val result = controller.executeBoundary(
+                hotspotOn = false,
+                mobileDataTarget = dataTarget,
+                password = null
+            )
+            reportTransaction("END '${routine?.name}'", result)
         }
         prefs.setLastAppliedBoundary(boundary.key)
+    }
+
+    /** Logs the whole transaction and raises an alert only for a real failure. */
+    private fun reportTransaction(label: String, result: com.iranjan.hotspotscheduler.accessibility.TransactionResult) {
+        Log.i(TAG, "transaction $label -> ${result.summary}")
+        AttemptLog.add("transaction $label -> ${result.summary}")
+        when {
+            result.hotspot == ToggleResult.FAILED || result.mobileData == ToggleResult.FAILED ->
+                notifications.notifyToggleFailed()
+            result.anyFailure -> notifications.notifyUnlockRequired()
+        }
     }
 
     private suspend fun pauseToday() {
@@ -283,13 +314,17 @@ class HotspotAutomationService : LifecycleService() {
     }
 
     private suspend fun turnOffNow() {
-        val result = controller.setHotspotState(false)
+        val result = controller.executeBoundary(
+            hotspotOn = false,
+            mobileDataTarget = null,
+            password = null
+        )
         val now = System.currentTimeMillis()
         val active = RoutineEvaluator.activeRoutines(repo.enabledRoutines(), now)
         if (active.isNotEmpty()) {
             prefs.setSuppressedUntilNextWindow(true)
         }
-        if (result == ToggleResult.FAILED) {
+        if (result.hotspot == ToggleResult.FAILED) {
             notifications.notifyToggleFailed()
         }
         Log.i(TAG, "turnOffNow result=$result suppressed=${active.isNotEmpty()}")

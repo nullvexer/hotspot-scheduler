@@ -286,12 +286,21 @@ Text(stringResource(R.string.setup_sleep_title), style = MaterialTheme.typograph
                         Text(stringResource(R.string.test_hotspot_off))
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { viewModel.testMobileData(true) }, enabled = !testRunning, modifier = Modifier.weight(1f)) {
                         Text(stringResource(R.string.test_data_on))
                     }
                     Button(onClick = { viewModel.testMobileData(false) }, enabled = !testRunning, modifier = Modifier.weight(1f)) {
                         Text(stringResource(R.string.test_data_off))
+                    }
+                }
+                // The scenario that used to fail: both operations as ONE unattended job.
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { viewModel.testBoth(true) }, enabled = !testRunning, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.setup_test_both))
+                    }
+                    Button(onClick = { viewModel.testBoth(false) }, enabled = !testRunning, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.setup_test_both_off))
                     }
                 }
                 if (testRunning) {

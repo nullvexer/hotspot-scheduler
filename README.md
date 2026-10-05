@@ -10,12 +10,16 @@ no root.
 
 ## What a scheduled toggle does
 
-1. **Turns the screen on** — a `SCREEN_BRIGHT_WAKE_LOCK` with `ACQUIRE_CAUSES_WAKEUP`, plus a
-   transparent host activity with `setTurnScreenOn(true)` / `setShowWhenLocked(true)`.
-2. **Unlocks the phone**, escalating — see below.
-3. **Opens the right Settings screen** and navigates to the switch if it is not already up.
-4. **Reads the switch state, clicks it, then reads it again** to confirm. One retry on failure.
-5. **Locks the screen again** via `AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN`.
+A scheduled routine is **one unattended job**. See "The transaction model" below — the lock happens
+once, at the very end, after every requested change.
+
+1. **Turn the screen on**, and verify `PowerManager.isInteractive` actually reports true.
+2. **Unlock the phone** — platform dismissal (swipe lock or trusted state), then one bounded PIN-pad
+   attempt, then wait for the person.
+3. **Open the right Settings screen** and navigate to the switch.
+4. **Read the switch state, click it, then read it again** to confirm. One retry on failure.
+5. **Do the same for mobile data**, while still unlocked.
+6. **Lock the phone once**, via `AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN`.
 
 Matching is safety-gated at every step: a switch is only clicked when its row text positively
 matches ("Mobile Hotspot" / "Mobile data"), unrelated rows (Bluetooth, Data saver, Roaming) are
@@ -47,7 +51,75 @@ So the unlock engine escalates:
    sent to its centre. If no node is found at all, a calibrated 4×3 grid position is used.
 5. **Manual wait** — keeps the screen awake and finishes the moment the phone is unlocked.
 
-### Failure discipline
+## The transaction model
+
+**A scheduled routine is one unattended job, not a series of separate jobs.** This is the single
+most important design decision in the app.
+
+An earlier build called `lockScreen()` from a `finally` inside *every individual toggle*. A routine
+needing both hotspot and mobile data therefore ran:
+
+```
+unlock -> hotspot ON -> LOCK -> mobile data ON   (on a now-locked phone)
+```
+
+so the second operation always failed. It also made the phone lock as soon as the first operation
+finished, which looked like the app misbehaving on its own.
+
+Now the lock belongs to the whole job:
+
+```
+transaction
+  ├── ensureScreenAwake()        (verified, not assumed)
+  ├── ensureUnlocked()           (platform -> PIN pad -> wait for the user)
+  ├── hotspot change
+  ├── mobile data change         (still unlocked)
+  ├── collect per-step results
+  └── lock ONCE at the very end
+```
+
+`executeBoundary()` and `runLiveTest()` both go through `transaction()`, which is the **only** place
+in the app that locks the phone. The individual steps are private and never touch screen state.
+The whole thing is serialised on one mutex, so a "turn off now" from the notification shade cannot
+interleave with a boundary toggle.
+
+Results are kept per step, so a partial failure is reported honestly rather than summarised as
+success — `"hotspot changed; mobile data FAILED"` is a different outcome from success, and it is
+logged that way.
+
+Waking is a **verified** operation, not "a wake lock was acquired":
+
+```
+already interactive? -> done
+else start the host activity (setTurnScreenOn) and poll PowerManager.isInteractive
+else fall back to the deprecated wake lock and poll again
+else abort with a distinct "screen did not wake" alert
+```
+
+Waking is independent of the keyguard. An earlier build refused to start the host activity at all
+when a secure PIN was present, so a PIN-protected phone relied entirely on the deprecated wake lock
+and the PIN-pad gestures were delivered to a dark screen.
+
+The "already on screen" fast path is only taken when the display is interactive **and** the device
+is unlocked **and** Settings is genuinely foreground. A locked phone can still hand back stale
+cached Settings nodes, and acting on those means operating on a screen nobody can see.
+
+## Acceptance behaviour
+
+With a routine from 02:00 to 03:00 that wants hotspot and mobile data on:
+
+| Time | What happens |
+|---|---|
+| 01:59 | screen off, locked, hotspot off, data off |
+| 02:00 | alarm -> wake -> unlock -> hotspot ON -> data ON -> verify -> **lock once** |
+| 02:01 | screen off, locked, hotspot **on**, data **on** |
+| 03:00 | alarm -> wake -> unlock -> hotspot OFF -> data OFF -> verify -> **lock once** |
+| 03:01 | screen off, locked, hotspot off, data off |
+
+No interaction required. Setup has **Both ON** / **Both OFF** live-test buttons that exercise
+exactly this path, so the behaviour can be checked without waiting for an alarm.
+
+## Failure discipline
 
 This is the part that matters most. Android counts wrong credential attempts, and some devices
 wipe on too many. So:
@@ -85,20 +157,6 @@ Turning the screen **off** needs no extra permission: `GLOBAL_ACTION_LOCK_SCREEN
 the Device Administrator that an earlier version required, and the `BIND_DEVICE_ADMIN` permission,
 the admin receiver and the policy XML are all gone.
 
-## Safety invariants
-
-These are the rules the code must never break, each covered by a unit test:
-
-1. **Never claim a hotspot is off when the state is unknown.** A switch whose state cannot be read
-   is never reported as toggled.
-2. **Never click a switch whose row text does not positively match.** A stale calibration goes
-   through the same keyword/negative-word scoring as every other strategy, and there is no
-   "first switch on the screen" fallback.
-3. **Never use a secret as a password by accident.** Decryption failures return null rather than
-   the stored ciphertext, because a Base64 blob is itself a valid 8–63 char passphrase.
-4. **Never leave user data to chance.** No destructive database migration, and export/import
-   round-trips the mobile-data flag and validates every field.
-
 ## Behavior decisions
 
 - **Boundary-only enforcement**: ON at window start, OFF at window end; manual changes between
@@ -121,22 +179,27 @@ These are the rules the code must never break, each covered by a unit test:
   by the engine; empty = keep the password already configured in Settings. Stored AES-GCM
   encrypted (Android Keystore, versioned ciphertext) and never exported. Passwords are never
   exported or logged.
-- Alerts (cap reached, toggle failure, both engines unavailable) use a high-importance channel.
+- Alerts (cap reached, toggle failure, screen will not wake, phone needed unlocking) use a
+  high-importance channel.
 
-## Safety invariants
+## These are the rules the code must never break
 
-These are the rules the code must never break, each covered by a unit test:
+Each is covered by a unit test or asserted by a single call site:
 
-1. **Never claim a hotspot is off when the state is unknown.** A failed `dumpsys` probe returns
-   null, and null is not `false`. The data-cap path reports "turned off" to the user, so an
-   unverified stop must not be reported as success.
-2. **Never click a switch whose row text does not positively match.** A stale calibration is a
+1. **Never lock the phone in the middle of a job.** Exactly one call to `lockScreen()`, inside
+   `lockAtEnd()`, called only from `transaction()`.
+2. **Never act on a screen nobody can see.** A toggle fast path requires interactive **and**
+   unlocked **and** Settings foreground.
+3. **Never report success for an unverified change.** Every switch is read before and after the
+   click; an unreadable state is a failure, never a pass.
+4. **Never click a switch whose row text does not positively match.** A stale calibration is a
    hint, not an override: it goes through the same keyword/negative-word scoring as every other
-   matching strategy, and there is no "first switch on the screen" fallback.
-3. **Never use a secret as a password by accident.** Decryption failures return null rather than
+   strategy, and there is no "first switch on the screen" fallback.
+5. **Never loop on a credential.** One attempt per job, then a 5-minute backoff.
+6. **Never use a secret as a password by accident.** Decryption failures return null rather than
    the stored ciphertext, because a Base64 blob is itself a valid 8–63 char passphrase.
-4. **Never leave user data to chance.** No destructive database migration, and export/import
-   round-trips the mobile-data flag and validates every field.
+7. **Never lose user data to a schema change.** No destructive database migration, and
+   export/import round-trips the mobile-data flag and validates every field.
 
 ## Build
 

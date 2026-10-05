@@ -190,6 +190,33 @@ class NotificationHelper @Inject constructor(
      * launch the screen on its own; the target is resolved from the device so the tap lands on the
      * right screen.
      */
+    /**
+ * The screen never became interactive, so nothing could be attempted. Distinct from the unlock
+ * alert because the cause is screen activation, not a credential.
+ */
+    fun notifyWakeFailed() {
+        val openSetup = PendingIntent.getActivity(
+            context,
+            24,
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        nm?.notify(
+            ID_WAKE_FAILED,
+            NotificationCompat.Builder(context, CHANNEL_ALERTS)
+                .setSmallIcon(R.drawable.ic_app_icon)
+                .setContentTitle(context.getString(R.string.notif_wake_failed_title))
+                .setContentText(context.getString(R.string.notif_wake_failed_text))
+                .setStyle(
+                    NotificationCompat.BigTextStyle()
+                        .bigText(context.getString(R.string.notif_wake_failed_text))
+                )
+                .setAutoCancel(true)
+                .setContentIntent(openSetup)
+                .build()
+        )
+    }
+
     fun postOpenHotspotSettingsPrompt() {
         val target = navigator.hotspotTarget()
         val pi = if (target != null) {
@@ -256,5 +283,6 @@ class NotificationHelper @Inject constructor(
         const val ID_ACC = 4
         const val ID_OPEN_PROMPT = 5
         const val ID_UNLOCK_REQUIRED = 6
+        const val ID_WAKE_FAILED = 7
     }
 }

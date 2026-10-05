@@ -64,6 +64,9 @@ class SetupViewModel @Inject constructor(
     private val _screenOffAfter = MutableStateFlow(true)
     val screenOffAfter: StateFlow<Boolean> = _screenOffAfter
 
+    private val _statusText = MutableStateFlow<String?>(null)
+    val statusText: StateFlow<String?> = _statusText
+
     init {
         refresh()
     }
@@ -133,19 +136,34 @@ class SetupViewModel @Inject constructor(
             AttemptLog.add("keypad diagnose: the accessibility service is not connected")
             return@launch
         }
-        screen.wakeScreen()
+        if (!screen.ensureScreenAwake()) {
+            AttemptLog.add("keypad diagnose: the screen would not wake")
+            return@launch
+        }
         val found = automator.diagnoseKeypad()
         AttemptLog.add("keypad diagnose: $found")
+        _statusText.value = found
     }
 
     fun setScreenOffAfter(enabled: Boolean) {
         _screenOffAfter.value = enabled
-        com.iranjan.hotspotscheduler.accessibility.AccessibilityHotspotControllerImpl
-            .turnScreenOffAfterToggle = enabled
-        AttemptLog.add("screen-off after toggle = $enabled")
+        (controller as? com.iranjan.hotspotscheduler.accessibility.AccessibilityHotspotControllerImpl)
+            ?.setLockWhenFinished(enabled)
+        AttemptLog.add("lock the phone when automation finishes = $enabled")
     }
 
-    fun testHotspot(on: Boolean) = viewModelScope.launch {
+    fun testHotspot(on: Boolean) = runLive(hotspot = on, mobileData = null)
+
+    fun testMobileData(on: Boolean) = runLive(hotspot = null, mobileData = on)
+
+    /** Tests the exact scenario the user reported: hotspot AND data in one unattended job. */
+    fun testBoth(on: Boolean) = runLive(hotspot = on, mobileData = on)
+
+    /**
+     * Live test, routed through the same transaction as a scheduled boundary so the test mirrors
+     * the real behaviour: wake, unlock, every requested step, then lock once.
+     */
+    private fun runLive(hotspot: Boolean?, mobileData: Boolean?) = viewModelScope.launch {
         _testRunning.value = true
         try {
             val password = repo.enabledRoutines()
@@ -153,16 +171,9 @@ class SetupViewModel @Inject constructor(
             if (password != null) {
                 AttemptLog.add("live test: using the password from an enabled routine")
             }
-            controller.setHotspotState(on, password)
-        } finally {
-            _testRunning.value = false
-        }
-    }
-
-    fun testMobileData(on: Boolean) = viewModelScope.launch {
-        _testRunning.value = true
-        try {
-            controller.setMobileData(on)
+            val result = controller.runLiveTest(hotspot, mobileData, password)
+            AttemptLog.add("live test result -> ${result.summary}")
+            _statusText.value = result.summary
         } finally {
             _testRunning.value = false
         }

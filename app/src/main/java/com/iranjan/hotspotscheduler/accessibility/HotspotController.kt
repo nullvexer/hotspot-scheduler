@@ -19,26 +19,88 @@ import javax.inject.Singleton
 
 enum class ToggleResult { ALREADY_OK, TOGGLED, FAILED, BLOCKED }
 
+/**
+ * Outcome of one complete unattended job: wake -> unlock -> all requested changes -> lock once.
+ *
+ * Per-step results are kept so a partial failure stays reportable. "hotspot changed, mobile data
+ * failed" must never be summarised as success.
+ */
+data class TransactionResult(
+    val hotspot: ToggleResult?,
+    val mobileData: ToggleResult?,
+    val screenAwake: Boolean,
+    val lockedAtEnd: Boolean
+) {
+    private fun isBad(r: ToggleResult?): Boolean =
+        r == ToggleResult.FAILED || r == ToggleResult.BLOCKED
+
+    val anyFailure: Boolean get() = isBad(hotspot) || isBad(mobileData)
+
+    val allSucceeded: Boolean get() = !anyFailure
+
+    fun describe(r: ToggleResult?): String = when (r) {
+        null -> "not requested"
+        ToggleResult.ALREADY_OK -> "already in the requested state"
+        ToggleResult.TOGGLED -> "changed"
+        ToggleResult.FAILED -> "FAILED"
+        ToggleResult.BLOCKED -> "BLOCKED (the phone stayed locked)"
+    }
+
+    val summary: String
+        get() = buildList {
+            if (hotspot != null) add("hotspot ${describe(hotspot)}")
+            if (mobileData != null) add("mobile data ${describe(mobileData)}")
+            add(if (screenAwake) "screen woke" else "SCREEN DID NOT WAKE")
+            add(if (lockedAtEnd) "phone locked at the end" else "phone left awake at the end")
+        }.joinToString("; ")
+}
+
 interface HotspotController {
     suspend fun readHotspotState(): Boolean?
-    suspend fun setHotspotState(targetOn: Boolean, password: String? = null): ToggleResult
-    suspend fun setMobileData(targetOn: Boolean): ToggleResult
+
+    /**
+     * Runs one whole scheduled boundary as a single unattended transaction.
+     *
+     * @param hotspotOn the hotspot target state.
+     * @param mobileDataTarget null to leave mobile data alone. The caller resolves the
+     *   end-of-window "does another routine still need data" question, because that needs the
+     *   routine list and this class deliberately knows nothing about routines.
+     * @param password optional per-routine hotspot passphrase.
+     */
+    suspend fun executeBoundary(
+        hotspotOn: Boolean,
+        mobileDataTarget: Boolean?,
+        password: String? = null
+    ): TransactionResult
+
+    /** Live test with the same transaction shape as a scheduled boundary. */
+    suspend fun runLiveTest(
+        hotspot: Boolean?,
+        mobileData: Boolean?,
+        password: String? = null
+    ): TransactionResult
+
     suspend fun requestCalibrationDump()
 }
 
 /**
  * Drives the Settings UI through the accessibility service. This is the only toggle engine.
  *
- * A toggle is a single sequence with escalating stages, and each stage only stops the sequence on
- * a definitive result:
+ * ## Transaction model
  *
- *  0. The target switch is already on screen and readable -> click it, verify, retry once.
- *  1. Turn the screen on and dismiss a non-secure keyguard.
- *  2. Launch the Settings screen and navigate to it.
- *  3. Ask the user to unlock, then poll until they have or the deadline passes.
+ * Screen ownership belongs to the whole job, never to an individual toggle. An earlier build called
+ * `lockScreen()` from a `finally` inside every single toggle, so a routine needing both hotspot and
+ * mobile data ran:
  *
- * `BLOCKED` means "the app cannot do this on its own" (a secure lock screen) and is distinct from
- * `FAILED` so the caller can tell the user something actionable instead of a generic failure.
+ * ```
+ * unlock -> hotspot ON -> LOCK -> mobile data ON     (on a now-locked phone)
+ * ```
+ *
+ * The lock now happens exactly once, after every requested step, inside [transaction]. The steps
+ * themselves ([setHotspot], [setMobileData]) never touch screen state.
+ *
+ * Everything is serialised on one mutex: this is a @Singleton, and a "turn off now" from the
+ * notification shade must not interleave with a boundary toggle.
  */
 @Singleton
 class AccessibilityHotspotControllerImpl @Inject constructor(
@@ -49,12 +111,15 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
     private val screen: ScreenControl
 ) : HotspotController {
 
-    /**
-     * Serialises every toggle. This is a @Singleton holding a KeyguardLock; without this a
-     * "turn off now" from the shade could restore the keyguard underneath an in-flight boundary
-     * toggle, and two attempts would drive the same Settings tree at once.
-     */
     private val toggleLock = Mutex()
+
+    /** User preference: put the phone back to sleep when the job finishes. */
+    @Volatile
+    private var lockWhenFinished = true
+
+    fun setLockWhenFinished(enabled: Boolean) {
+        lockWhenFinished = enabled
+    }
 
     override suspend fun readHotspotState(): Boolean? = withContext(Dispatchers.Default) {
         val service = AccessibilityServiceHolder.service ?: return@withContext null
@@ -65,58 +130,183 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         NodeMatcher.readState(match)
     }
 
-    override suspend fun setHotspotState(targetOn: Boolean, password: String?): ToggleResult =
-        toggleLock.withLock { setHotspotStateLocked(targetOn, password) }
-
-    private suspend fun setHotspotStateLocked(targetOn: Boolean, password: String?): ToggleResult {
-        val validPassword = password?.takeIf { PassphraseRules.isValid(it) }
-        if (password != null && validPassword == null) {
-            AttemptLog.add(
-                "routine password rejected by WPA2 rules " +
-                    "(${PassphraseRules.rejectionReason(password)}); keeping the current password"
-            )
+    override suspend fun executeBoundary(
+        hotspotOn: Boolean,
+        mobileDataTarget: Boolean?,
+        password: String?
+    ): TransactionResult = toggleLock.withLock {
+        transaction("boundary hotspot=$hotspotOn data=$mobileDataTarget") {
+            val valid = validatePassword(password)
+            var hotspot: ToggleResult? = null
+            var mobile: ToggleResult? = null
+            try {
+                hotspot = setHotspot(hotspotOn, valid)
+                // Second step deliberately runs while the phone is still unlocked.
+                if (mobileDataTarget != null) {
+                    mobile = setMobileData(mobileDataTarget)
+                }
+            } finally {
+                AttemptLog.add("boundary work finished: hotspot=$hotspot mobileData=$mobile")
+            }
+            TransactionResult(hotspot, mobile, screenAwake = true, lockedAtEnd = false)
         }
-        val result = withTimeoutOrNull(TOTAL_TIMEOUT_MS) {
-            runToggle(KEYWORD_HOTSPOT, targetOn, useCalibration = true, password = validPassword)
-        } ?: ToggleResult.FAILED
-
-        AttemptLog.add("HOTSPOT target=$targetOn -> $result")
-        when (result) {
-            ToggleResult.FAILED -> Log.e(TAG, "hotspot toggle failed targetOn=$targetOn")
-            ToggleResult.BLOCKED -> notifications.notifyUnlockRequired()
-            else -> prefs.setLastKnownHotspotOn(targetOn)
-        }
-        return result
     }
 
-    override suspend fun setMobileData(targetOn: Boolean): ToggleResult = toggleLock.withLock {
-        val result = withTimeoutOrNull(TOTAL_TIMEOUT_MS) {
-            runToggle(KEYWORD_MOBILE_DATA, targetOn, useCalibration = false, password = null)
-        } ?: ToggleResult.FAILED
-        AttemptLog.add("MOBILE DATA target=$targetOn -> $result")
-        Log.i(TAG, "mobile data toggle targetOn=$targetOn result=$result")
-        result
+    override suspend fun runLiveTest(
+        hotspot: Boolean?,
+        mobileData: Boolean?,
+        password: String?
+    ): TransactionResult = toggleLock.withLock {
+        transaction("live test hotspot=$hotspot data=$mobileData") {
+            val valid = validatePassword(password)
+            var hotspotResult: ToggleResult? = null
+            var mobileResult: ToggleResult? = null
+            try {
+                if (hotspot != null) hotspotResult = setHotspot(hotspot, valid)
+                if (mobileData != null) mobileResult = setMobileData(mobileData)
+            } finally {
+                AttemptLog.add("live test finished: hotspot=$hotspotResult mobileData=$mobileResult")
+            }
+            TransactionResult(hotspotResult, mobileResult, screenAwake = true, lockedAtEnd = false)
+        }
     }
 
     override suspend fun requestCalibrationDump() {
         AccessibilityServiceHolder.service?.emitCalibrationDump()
     }
 
-    private suspend fun runToggle(
-        rowKeyword: String,
-        targetOn: Boolean,
-        useCalibration: Boolean,
-        password: String?
-    ): ToggleResult {
-        try {
-            return runToggleInner(rowKeyword, targetOn, useCalibration, password)
-        } finally {
-            // Never leave the screen on because of a toggle that ended early.
-            settleScreen()
+    /**
+     * Owns the lifecycle of one job. This is the ONLY place in the app that locks the phone.
+     *
+     * ensure awake -> ensure unlocked -> every requested step -> lock once
+     *
+     * @return the block's result, with the lock outcome folded in. On an early exit the phone is
+     *   still locked, because the user has to unlock it themselves.
+     */
+    private suspend fun transaction(
+        label: String,
+        block: suspend () -> TransactionResult
+    ): TransactionResult {
+        AttemptLog.add("=== transaction start: $label")
+
+        if (!screen.ensureScreenAwake()) {
+            val failed = TransactionResult(
+                ToggleResult.BLOCKED, null, screenAwake = false, lockedAtEnd = screen.isDeviceLocked()
+            )
+            AttemptLog.add("transaction aborted: ${failed.summary}")
+            notifications.notifyWakeFailed()
+            return failed
+        }
+
+        if (!ensureUnlocked()) {
+            val blocked = TransactionResult(
+                ToggleResult.BLOCKED, ToggleResult.BLOCKED,
+                screenAwake = true, lockedAtEnd = true
+            )
+            AttemptLog.add("transaction could not unlock the phone: ${blocked.summary}")
+            return blocked
+        }
+
+        val result = try {
+            block()
+        } catch (t: Throwable) {
+            Log.e(TAG, "transaction body failed", t)
+            AttemptLog.add("transaction body threw: ${t.message}")
+            TransactionResult(ToggleResult.FAILED, null, screenAwake = true, lockedAtEnd = false)
+        }
+
+        val locked = lockAtEnd()
+        val final = result.copy(screenAwake = true, lockedAtEnd = locked)
+        AttemptLog.add("=== transaction end: ${final.summary}")
+        return final
+    }
+
+    /** Puts the phone back to sleep, once, after every step has finished. */
+    private suspend fun lockAtEnd(): Boolean {
+        if (!lockWhenFinished) {
+            AttemptLog.add("leaving the phone awake: 'lock when automation finishes' is off")
+            return false
+        }
+        delay(POST_TOGGLE_SETTLE_MS)
+        when {
+            !screen.isInteractive() -> return false
+            // The user (or Smart Lock) locked it during the job; nothing to undo.
+            screen.isDeviceLocked() -> return true
+            screen.lockScreen() -> {
+                delay(POST_LOCK_SETTLE_MS)
+                return true
+            }
+            else -> {
+                AttemptLog.add("could not lock the phone at the end of the transaction")
+                return false
+            }
         }
     }
 
-private suspend fun runToggleInner(
+    /**
+     * Escalating unlock: platform dismissal (swipe lock or trusted state), then one bounded PIN-pad
+     * attempt, then wait for the person. Never loops on a credential.
+     */
+    private suspend fun ensureUnlocked(): Boolean {
+        if (!screen.isDeviceLocked()) return true
+
+        if (screen.requestPlatformDismiss()) {
+            AttemptLog.add("keyguard dismissed by the platform (non-secure or trusted state)")
+            delay(UNLOCK_SETTLE_MS)
+            return !screen.isDeviceLocked()
+        }
+
+        if (screen.unlockWithCredential()) {
+            AttemptLog.add("unlocked by entering the stored credential")
+            delay(UNLOCK_SETTLE_MS)
+            return !screen.isDeviceLocked()
+        }
+
+        AttemptLog.add("automated unlock did not work; waiting for the user")
+        return awaitManualUnlock()
+    }
+
+    private suspend fun awaitManualUnlock(): Boolean {
+        notifications.notifyUnlockRequired()
+        AttemptLog.add("waiting up to ${MANUAL_WAIT_MS / 1000}s for the phone to be unlocked")
+        val deadline = System.currentTimeMillis() + MANUAL_WAIT_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (!screen.isDeviceLocked()) {
+                AttemptLog.add("unlocked by hand; continuing")
+                return true
+            }
+            screen.ensureScreenAwake()
+            delay(1000)
+        }
+        AttemptLog.add("still locked after ${MANUAL_WAIT_MS / 1000}s")
+        return false
+    }
+
+    /** One network operation. Never wakes, unlocks or locks: the transaction owns that. */
+    private suspend fun setHotspot(targetOn: Boolean, password: String?): ToggleResult {
+        val result = withTimeoutOrNull(STEP_TIMEOUT_MS) {
+            runToggle(KEYWORD_HOTSPOT, targetOn, useCalibration = true, password = password)
+        } ?: ToggleResult.FAILED
+        AttemptLog.add("HOTSPOT target=$targetOn -> $result")
+        if (result == ToggleResult.FAILED) Log.e(TAG, "hotspot toggle failed targetOn=$targetOn")
+        if (result != ToggleResult.FAILED) prefs.setLastKnownHotspotOn(targetOn)
+        return result
+    }
+
+    /** One network operation. Never wakes, unlocks or locks: the transaction owns that. */
+    private suspend fun setMobileData(targetOn: Boolean): ToggleResult {
+        val result = withTimeoutOrNull(STEP_TIMEOUT_MS) {
+            runToggle(KEYWORD_MOBILE_DATA, targetOn, useCalibration = false, password = null)
+        } ?: ToggleResult.FAILED
+        AttemptLog.add("MOBILE DATA target=$targetOn -> $result")
+        return result
+    }
+
+    /**
+     * Drives one switch. Stages escalate, and only a definitive result stops the ladder - a
+     * FAILED click must still fall through to launch/navigate and the manual wait.
+     */
+    private suspend fun runToggle(
         rowKeyword: String,
         targetOn: Boolean,
         useCalibration: Boolean,
@@ -124,113 +314,38 @@ private suspend fun runToggleInner(
     ): ToggleResult {
         AttemptLog.add("=== toggle $rowKeyword target=$targetOn start; ${screen.capabilities()}")
 
-        // Stage 0: the switch may already be on screen (app left in Settings, user is awake).
+        // Stage 0: only when there is genuinely a live, unlocked Settings window in front. A
+        // locked phone can still hand back stale cached Settings nodes, and acting on those would
+        // be operating on a screen the user cannot see.
+        if (screen.isInteractive() && !screen.isDeviceLocked() && settingsForeground()) {
+            settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+        }
+
+        // Stage 1: make sure Settings is up and the phone is usable.
+        launchFor(rowKeyword)
+        awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
         settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
-        // Stage 1: wake the screen and get the phone unlocked.
-        screen.wakeScreen(WAKE_HOLD_MS)
-        ensureUnlocked()
+        // Stage 2: navigate through Connections -> Data usage / Mobile hotspot.
+        navigateFor(rowKeyword, useCalibration)
+        settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
-        // Stage 2: launch Settings and navigate.
-        if (!screen.isDeviceLocked()) {
-            launchFor(rowKeyword)
-            awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
-            settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-            navigateFor(rowKeyword, useCalibration)
-            settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-            AttemptLog.add("gave up after launching Settings for '$rowKeyword'")
-            return ToggleResult.FAILED
-        }
-
-        // Stage 3: still locked after unlocking was attempted - wait for the person.
-        return awaitManualUnlock(rowKeyword, targetOn, useCalibration, password)
+        logScreenDump(rowKeyword)
+        return ToggleResult.FAILED
     }
 
-    /**
-     * Brings the phone from locked to unlocked, in escalating order:
-     *  1. platform dismissal, which covers a swipe lock and any trusted state (Smart Lock,
-     *     Extend Unlock, trusted places) with no interaction at all;
-     *  2. one bounded attempt at the PIN pad through the accessibility service.
-     *
-     * Leaves the phone untouched if neither works; the caller then falls back to waiting for the
-     * person. Never loops: repeated credential submissions risk an Android lockout.
-     */
-    private suspend fun ensureUnlocked() {
-        if (!screen.isDeviceLocked()) return
-
-        if (screen.requestPlatformDismiss()) {
-            AttemptLog.add("keyguard dismissed by the platform (trusted or non-secure)")
-            delay(SETTLE_DELAY_MS)
-            return
-        }
-
-        if (screen.unlockWithCredential()) {
-            AttemptLog.add("unlocked by entering the stored credential")
-            delay(SETTLE_DELAY_MS)
-            return
-        }
-
-        AttemptLog.add("automated unlock did not succeed; will wait for the user")
-    }
-
-    /**
-     * Last resort: the phone needs a person. Wakes it, tells them once, and waits.
-     *
-     * A PIN failure is never retried inside the window: Android counts wrong credential attempts
-     * and can lock the device or wipe it, so a flaky automation bug must not become a lockout.
-     */
-    private suspend fun awaitManualUnlock(
-        rowKeyword: String,
-        targetOn: Boolean,
-        useCalibration: Boolean,
-        password: String?
-    ): ToggleResult {
-        AttemptLog.add("waiting up to ${MANUAL_WAIT_MS / 1000}s for the phone to be unlocked")
-        notifications.notifyUnlockRequired()
-        val deadline = System.currentTimeMillis() + MANUAL_WAIT_MS
-        var announced = false
-        while (System.currentTimeMillis() < deadline) {
-            if (!screen.isDeviceLocked()) {
-                AttemptLog.add("unlocked; resuming automation")
-                launchFor(rowKeyword)
-                awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
-                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-                navigateFor(rowKeyword, useCalibration)
-                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-                return ToggleResult.FAILED
-            }
-            screen.wakeScreen(WAKE_HOLD_MS)
-            if (!announced) {
-                announced = true
-                AttemptLog.add("notified the user that a credential is needed")
-            }
-            delay(1000)
-        }
-        AttemptLog.add("still locked after ${MANUAL_WAIT_MS / 1000}s")
-        return ToggleResult.BLOCKED
-    }
-
-    /** Only a definitive result stops the ladder; FAILED means "try the next stage". */
     private fun settle(result: ToggleResult?): ToggleResult? =
-        when (result) {
-            null, ToggleResult.FAILED -> null
-            else -> result
-        }
+        if (result != null && result != ToggleResult.FAILED) result else null
 
-/**
-     * Restores the screen afterwards: turns it back off if we turned it on, unless the user is
-     * actively using the phone or the toggle failed and the screen is still needed.
-     *
-     * Uses the accessibility global action, so no device administrator is required.
-     */
-    private suspend fun settleScreen() {
-        if (!turnScreenOffAfterToggle) return
-        delay(POST_TOGGLE_SETTLE_MS)
-        when {
-            !screen.isInteractive() -> Unit
-            screen.isDeviceLocked() -> Unit
-            screen.lockScreen() -> delay(POST_LOCK_SETTLE_MS)
+    private suspend fun launchFor(rowKeyword: String): Boolean {
+        val launched = if (rowKeyword == KEYWORD_HOTSPOT) {
+            navigator.launchHotspotSettings(screen)
+        } else {
+            navigator.launchDataUsageSettings(screen)
         }
+        val root = rootNode()
+        AttemptLog.add("launched=$launched screen=${root?.className} pkg=${root?.packageName}")
+        return launched
     }
 
     private suspend fun navigateFor(rowKeyword: String, useCalibration: Boolean): Boolean {
@@ -252,24 +367,6 @@ private suspend fun runToggleInner(
             if (findToggle(rowKeyword, calibration) != null) return true
         }
         return false
-    }
-
-    private suspend fun logScreenDump(rowKeyword: String) {
-        val root = rootNode() ?: return
-        val lines = withContext(Dispatchers.Default) { NodeDumper.dumpCompact(root, 40) }
-        AttemptLog.add("screen dump for '$rowKeyword':")
-        lines.forEach { AttemptLog.add(it) }
-    }
-
-private suspend fun launchFor(rowKeyword: String): Boolean {
-        val launched = if (rowKeyword == KEYWORD_HOTSPOT) {
-            navigator.launchHotspotSettings(screen)
-        } else {
-            navigator.launchDataUsageSettings(screen)
-        }
-        val root = rootNode()
-        AttemptLog.add("launched=$launched screen=${root?.className} pkg=${root?.packageName}")
-        return launched
     }
 
     private suspend fun attempt(
@@ -332,7 +429,6 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
                 }
             }
         }
-        logScreenDump(rowKeyword)
         return ToggleResult.FAILED
     }
 
@@ -347,7 +443,7 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
             }
         }
         if (editor == null) {
-            AttemptLog.add("password field not found; keeping existing password")
+            AttemptLog.add("password field not found; keeping the existing password")
             return
         }
         val applied = withContext(Dispatchers.Default) { NodeMatcher.setText(editor, password) }
@@ -365,9 +461,8 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
         withContext(Dispatchers.Default) {
             row.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
-        AttemptLog.add("clicked hotspot row to open config screen")
-        val opened = awaitPasswordField(CONFIG_WAIT_MS)
-        AttemptLog.add("config screen with password field=$opened")
+        AttemptLog.add("clicked the hotspot row to open the config screen")
+        AttemptLog.add("config screen with a password field=${awaitPasswordField(CONFIG_WAIT_MS)}")
     }
 
     private suspend fun findToggle(
@@ -382,10 +477,7 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
             val root = service.rootNode()
             when {
                 root == null -> null
-                !isSettingsPackage(root) -> {
-                    AttemptLog.add("ignoring own window; waiting for settings")
-                    null
-                }
+                !isSettingsPackage(root) -> null
                 else -> NodeMatcher.findToggle(root, calibration, rowKeyword)
             }
         }
@@ -394,6 +486,10 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
     private suspend fun settingsRoot(): AccessibilityNodeInfo? = withContext(Dispatchers.Default) {
         val root = rootNode() ?: return@withContext null
         if (!isSettingsPackage(root)) null else root
+    }
+
+    private suspend fun settingsForeground(): Boolean = withContext(Dispatchers.Default) {
+        AccessibilityServiceHolder.service?.rootNode()?.let { isSettingsPackage(it) } ?: false
     }
 
     private suspend fun awaitPasswordField(timeoutMs: Long): Boolean {
@@ -424,7 +520,11 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
         return false
     }
 
-    private suspend fun awaitScreen(rowKeyword: String, useCalibration: Boolean, timeoutMs: Long): Boolean {
+    private suspend fun awaitScreen(
+        rowKeyword: String,
+        useCalibration: Boolean,
+        timeoutMs: Long
+    ): Boolean {
         val calibration = if (useCalibration) prefs.calibration() else null
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -434,11 +534,30 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
         return false
     }
 
+    private suspend fun logScreenDump(rowKeyword: String) {
+        val root = rootNode() ?: return
+        val lines = withContext(Dispatchers.Default) { NodeDumper.dumpCompact(root, 40) }
+        AttemptLog.add("screen dump for '$rowKeyword':")
+        lines.forEach { AttemptLog.add(it) }
+    }
+
     private fun isSettingsPackage(root: AccessibilityNodeInfo): Boolean {
         val pkg = root.packageName?.toString() ?: return false
-        val ok = pkg == SETTINGS_PACKAGE || pkg == SAMSUNG_SETTINGS_PACKAGE
-        if (!ok) AttemptLog.add("unexpected window: $pkg")
-        return ok
+        if (pkg != SETTINGS_PACKAGE && pkg != SAMSUNG_SETTINGS_PACKAGE) {
+            AttemptLog.add("unexpected window: $pkg")
+            return false
+        }
+        return true
+    }
+
+    private fun validatePassword(password: String?): String? {
+        if (password == null) return null
+        if (PassphraseRules.isValid(password)) return password
+        AttemptLog.add(
+            "routine password rejected by WPA2 rules (${PassphraseRules.rejectionReason(password)}); " +
+                "keeping the password already set in Settings"
+        )
+        return null
     }
 
     companion object {
@@ -446,22 +565,13 @@ private suspend fun launchFor(rowKeyword: String): Boolean {
         const val SAMSUNG_SETTINGS_PACKAGE = "com.samsung.android.settings"
         private const val TAG = "HSAuto"
         private const val STATE_TIMEOUT_MS = 3_000L
-        private const val SCREEN_WAIT_MS = 6_000L
+        private const val SCREEN_WAIT_MS = 8_000L
         private const val CONFIG_WAIT_MS = 6_000L
-private const val MANUAL_WAIT_MS = 90_000L
-        private const val TOTAL_TIMEOUT_MS = 180_000L
-        private const val WAKE_HOLD_MS = 120_000L
-        private const val SETTLE_DELAY_MS = 1_200L
+        private const val STEP_TIMEOUT_MS = 60_000L
+        private const val MANUAL_WAIT_MS = 90_000L
+        private const val UNLOCK_SETTLE_MS = 1_200L
         private const val NAVIGATE_DELAY_MS = 1_800L
-        private const val NAVIGATE_EVERY = 8
         private const val POST_TOGGLE_SETTLE_MS = 1_200L
         private const val POST_LOCK_SETTLE_MS = 400L
-
-        /**
-         * Set from the Setup screen. When true, a completed toggle turns the screen back off via
-         * the device administrator, provided the user was not already using the phone.
-         */
-        @Volatile
-        var turnScreenOffAfterToggle: Boolean = true
     }
 }

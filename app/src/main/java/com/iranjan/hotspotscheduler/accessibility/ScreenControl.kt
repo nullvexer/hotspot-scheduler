@@ -57,24 +57,65 @@ class ScreenControl @Inject constructor(
     fun smartLockIntent(): Intent =
         Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-    /** Turns the display on if it is off. The wake lock is time-boxed so it cannot leak. */
-    fun wakeScreen(holdMs: Long = DEFAULT_WAKE_HOLD_MS): Boolean {
-        val pm = powerManager ?: return false
-        if (pm.isInteractive) return true
-        return try {
-            @Suppress("DEPRECATION")
-            val lock = pm.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "HotspotScheduler:wake"
-            )
-            lock.setReferenceCounted(false)
-            lock.acquire(holdMs)
-            true
-        } catch (t: Throwable) {
-            Log.e(TAG, "wakeScreen failed", t)
-            AttemptLog.add("wake failed: ${t.message}")
-            false
+    /**
+     * Turns the display on and **verifies it** before returning.
+     *
+     * The previous version returned true as soon as a wake lock had been acquired, which is not
+     * the same thing as the display being on. On a locked phone with a PIN the app then sent
+     * accessibility gestures at a screen that was still dark, so nothing happened.
+     *
+     * Order of preference:
+     *  1. already interactive -> done;
+     *  2. the host activity, whose `setTurnScreenOn(true)` is the documented mechanism, polled until
+     *     `PowerManager.isInteractive` actually reports true;
+     *  3. only then the deprecated wake-lock path as a fallback, also polled.
+     *
+     * Works regardless of whether a secure keyguard is present: waking and unlocking are separate
+     * concerns, and the old code refused to start the host activity at all when a PIN was set.
+     */
+    suspend fun ensureScreenAwake(): Boolean {
+        if (isInteractive()) return true
+
+        runCatching {
+            context.startActivity(ToggleHostActivity.wakeIntent(context))
+        }.onFailure { AttemptLog.add("wake host launch failed: ${it.message}") }
+
+        if (awaitInteractive(HOST_WAKE_TIMEOUT_MS)) {
+            AttemptLog.add("screen is interactive (host activity)")
+            return true
         }
+
+        // Fallback for ROMs that refuse a background activity start.
+        try {
+            val pm = powerManager
+            if (pm != null) {
+                @Suppress("DEPRECATION")
+                val lock = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "HotspotScheduler:wake"
+                )
+                lock.setReferenceCounted(false)
+                lock.acquire(WAKE_LOCK_HOLD_MS)
+                if (awaitInteractive(WAKE_LOCK_SETTLE_MS)) {
+                    AttemptLog.add("screen is interactive (wake lock fallback)")
+                    return true
+                }
+            }
+        } catch (t: Throwable) {
+            AttemptLog.add("wake lock fallback failed: ${t.message}")
+        }
+
+        AttemptLog.add("screen did not become interactive; automation cannot continue")
+        return false
+    }
+
+    private suspend fun awaitInteractive(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (isInteractive()) return true
+            delay(100)
+        }
+        return false
     }
 
     /**
@@ -208,7 +249,9 @@ class ScreenControl @Inject constructor(
 
     companion object {
         private const val TAG = "HSScreen"
-        private const val DEFAULT_WAKE_HOLD_MS = 90_000L
+        private const val HOST_WAKE_TIMEOUT_MS = 4_000L
+        private const val WAKE_LOCK_HOLD_MS = 20_000L
+        private const val WAKE_LOCK_SETTLE_MS = 4_000L
         private const val DISMISS_TIMEOUT_MS = 12_000L
     }
 }
