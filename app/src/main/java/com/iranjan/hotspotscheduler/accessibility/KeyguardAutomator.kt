@@ -3,6 +3,8 @@ package com.iranjan.hotspotscheduler.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Path
 import android.graphics.Rect
+import com.iranjan.hotspotscheduler.domain.KeypadGeometry
+import com.iranjan.hotspotscheduler.domain.KeypadGeometryValidator
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.delay
@@ -20,6 +22,10 @@ import kotlinx.coroutines.delay
  * to run again inside [LOCKOUT_GUARD_MS] of a failure, and never loops on failure.
  */
 class KeyguardAutomator(private val service: AccessibilityService) {
+
+    /** Measured once per unlock attempt; measuring per digit risks acting on a changed screen. */
+    private var cachedGeometry: KeypadGeometry? = null
+    private var foundDigitCount: Int = 0
 
     sealed interface Outcome {
         /** The keypad was found and every digit was accepted, and the device reports unlocked. */
@@ -49,6 +55,8 @@ class KeyguardAutomator(private val service: AccessibilityService) {
      */
     suspend fun unlock(pin: String, autoSubmit: Boolean = true): Outcome {
         if (pin.isEmpty()) return Outcome.NotConfigured
+        cachedGeometry = null
+        foundDigitCount = 0
 
         // Reveal the keypad. It is sometimes already up (the phone locked while Settings was in
         // the foreground), so a blind swipe is not always correct: check first.
@@ -124,21 +132,88 @@ class KeyguardAutomator(private val service: AccessibilityService) {
         return keypadPresent()
     }
 
-    private fun tapDigit(c: Char): Boolean {
+    /**
+     * Taps one digit.
+ *
+     * Order of preference:
+     *  1. the key node's own `ACTION_CLICK`;
+     *  2. a `dispatchGesture` tap at the node's real centre;
+     *  3. **only if a real keypad was detected and its geometry validated**, a tap at the derived
+     *     position.
+ *
+ * There is deliberately no blind `screenHeight * 0.8` guess any more. A wrong tap is a wrong PIN
+ * digit, and one failed credential attempt costs a five-minute backoff - the previous fallback
+ * could plausibly burn the attempt on the wrong keys.
+ */
+private fun tapDigit(c: Char): Boolean {
         val digit = c - '0'
+
         val node = findFirst(KeyguardIds.digitCandidates(digit))
         if (node != null) {
             if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-            // Present but not clickable: fall through to the gesture path.
             node.clickPoint()?.let { (x, y) -> return tap(x, y) }
             return false
         }
-        // No node: last resort is the calibrated grid position.
-        val (fx, fy) = KeyguardIds.digitGridFraction(digit)
+
+        val geometry = validatedGeometry()
+        if (geometry == null) {
+            AttemptLog.add("no node for '$c' and no validated keypad geometry; refusing to guess")
+            return false
+        }
+        val metrics = displayMetrics()
+        val (fx, fy) = geometry.centreOf(digit) ?: run {
+            AttemptLog.add("validated keypad has no centre for '$c'")
+            return false
+        }
+        return tap(metrics.widthPixels * fx, metrics.heightPixels * fy)
+    }
+
+    /**
+     * Detects the keypad and validates its geometry. Cached per unlock attempt, because measuring
+     * the tree on every digit is both slow and a chance to act on a changed screen.
+     */
+    private fun validatedGeometry(): KeypadGeometry? {
+        cachedGeometry?.let { return it }
+        when (val result = detectGeometry()) {
+            is KeypadGeometryValidator.Result.Valid -> {
+                cachedGeometry = result.geometry
+                AttemptLog.add(
+                    "keypad geometry validated from ${foundDigitCount}/10 detected keys " +
+                        "(package=${result.geometry.sourcePackage})"
+                )
+                return result.geometry
+            }
+            is KeypadGeometryValidator.Result.Invalid -> {
+                AttemptLog.add("keypad geometry rejected: ${result.reason}")
+                return null
+            }
+        }
+    }
+
+    /** Measures every digit key currently visible and asks the validator to judge the layout. */
+    private fun detectGeometry(): KeypadGeometryValidator.Result {
+        val metrics = displayMetrics()
+        val bounds = LinkedHashMap<Int, IntArray>()
+        (0..9).forEach { digit ->
+            val node = findFirst(KeyguardIds.digitCandidates(digit)) ?: return@forEach
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (!rect.isEmpty) bounds[digit] = intArrayOf(rect.left, rect.top, rect.right, rect.bottom)
+        }
+        foundDigitCount = bounds.size
+        return KeypadGeometryValidator.build(
+            bounds = bounds,
+            displayWidth = metrics.widthPixels,
+            displayHeight = metrics.heightPixels,
+            sourcePackage = runCatching { rootPackage() }.getOrNull()
+        )
+    }
+
+    private fun displayMetrics(): android.util.DisplayMetrics {
         val metrics = android.util.DisplayMetrics()
         @Suppress("DEPRECATION")
         service.resources.displayMetrics?.let { metrics.setTo(it) }
-        return tap(metrics.widthPixels * fx, metrics.heightPixels * fy)
+        return metrics
     }
 
     private fun tapEnter(): Boolean {

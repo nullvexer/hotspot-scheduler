@@ -74,39 +74,6 @@ class KeyguardIdsTest {
     }
 
     @Test
-    fun `grid fractions are inside the screen`() {
-        for (d in 0..9) {
-            val (fx, fy) = KeyguardIds.digitGridFraction(d)
-            assertTrue("digit $d x out of bounds: $fx", fx in 0f..1f)
-            assertTrue("digit $d y out of bounds: $fy", fy in 0f..1f)
-        }
-    }
-
-    @Test
-    fun `grid puts zero in the bottom middle`() {
-        val (x, y) = KeyguardIds.digitGridFraction(0)
-        assertEquals(0.5f, x, 0.001f)
-        val (_, oneY) = KeyguardIds.digitGridFraction(1)
-        assertTrue("zero should sit below one", y > oneY)
-    }
-
-    @Test
-    fun `grid rows are ordered top to bottom`() {
-        val ys = listOf(1, 4, 7).map { KeyguardIds.digitGridFraction(it).second }
-        assertTrue("rows must descend", ys[0] < ys[1] && ys[1] < ys[2])
-    }
-
-    @Test
-    fun `digits in the same column share an x, and columns differ`() {
-        val leftX = listOf(1, 4, 7).map { KeyguardIds.digitGridFraction(it).first }
-        val rightX = listOf(3, 6, 9).map { KeyguardIds.digitGridFraction(it).first }
-        assertEquals("column 1 must share one x", 1, leftX.toSet().size)
-        assertEquals("column 3 must share one x", 1, rightX.toSet().size)
-        assertTrue("the two columns must differ", leftX.first() != rightX.first())
-        assertTrue("column 1 is left of column 3", leftX.first() < rightX.first())
-    }
-
-    @Test
     fun `swipe fraction goes upward`() {
         val (fx, startY, endY) = KeyguardIds.swipeFraction()
         assertEquals(0.5f, fx, 0.001f)

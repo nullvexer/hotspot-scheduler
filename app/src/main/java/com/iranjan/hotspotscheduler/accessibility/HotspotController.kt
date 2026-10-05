@@ -5,6 +5,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.iranjan.hotspotscheduler.data.model.CalibrationSignature
 import com.iranjan.hotspotscheduler.data.prefs.AutomationPrefs
+import com.iranjan.hotspotscheduler.domain.OperationOrder
 import com.iranjan.hotspotscheduler.service.NotificationHelper
 import com.iranjan.hotspotscheduler.util.PassphraseRules
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -137,18 +138,30 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
     ): TransactionResult = toggleLock.withLock {
         transaction("boundary hotspot=$hotspotOn data=$mobileDataTarget") {
             val valid = validatePassword(password)
-            var hotspot: ToggleResult? = null
-            var mobile: ToggleResult? = null
-            try {
-                hotspot = setHotspot(hotspotOn, valid)
-                // Second step deliberately runs while the phone is still unlocked.
-                if (mobileDataTarget != null) {
-                    mobile = setMobileData(mobileDataTarget)
+            val results = LinkedHashMap<OperationOrder.Feature, ToggleResult>()
+            // Dependency-safe order: mobile data before the hotspot when turning things on,
+            // because an internet-sharing hotspot needs an upstream to be useful.
+            AttemptLog.add("operation order: ${OperationOrder.describe(hotspotOn, mobileDataTarget)}")
+            for (feature in OperationOrder.plan(hotspotOn, mobileDataTarget)) {
+                // An unexpected lock mid-transaction means a person touched the phone or the
+                // system intervened. Stop rather than driving the UI blind or re-attempting the
+                // credential.
+                if (screen.isDeviceLocked()) {
+                    AttemptLog.add("phone locked unexpectedly before ${feature.name}; stopping")
+                    results[feature] = ToggleResult.BLOCKED
+                    break
                 }
-            } finally {
-                AttemptLog.add("boundary work finished: hotspot=$hotspot mobileData=$mobile")
+                results[feature] = when (feature) {
+                    OperationOrder.Feature.HOTSPOT -> setHotspot(hotspotOn == true, valid)
+                    OperationOrder.Feature.MOBILE_DATA -> setMobileData(mobileDataTarget == true)
+                }
             }
-            TransactionResult(hotspot, mobile, screenAwake = true, lockedAtEnd = false)
+            TransactionResult(
+                hotspot = results[OperationOrder.Feature.HOTSPOT],
+                mobileData = results[OperationOrder.Feature.MOBILE_DATA],
+                screenAwake = true,
+                lockedAtEnd = false
+            )
         }
     }
 
@@ -159,15 +172,25 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
     ): TransactionResult = toggleLock.withLock {
         transaction("live test hotspot=$hotspot data=$mobileData") {
             val valid = validatePassword(password)
-            var hotspotResult: ToggleResult? = null
-            var mobileResult: ToggleResult? = null
-            try {
-                if (hotspot != null) hotspotResult = setHotspot(hotspot, valid)
-                if (mobileData != null) mobileResult = setMobileData(mobileData)
-            } finally {
-                AttemptLog.add("live test finished: hotspot=$hotspotResult mobileData=$mobileResult")
+            val results = LinkedHashMap<OperationOrder.Feature, ToggleResult>()
+            AttemptLog.add("operation order: ${OperationOrder.describe(hotspot, mobileData)}")
+            for (feature in OperationOrder.plan(hotspot, mobileData)) {
+                if (screen.isDeviceLocked()) {
+                    AttemptLog.add("phone locked unexpectedly before ${feature.name}; stopping")
+                    results[feature] = ToggleResult.BLOCKED
+                    break
+                }
+                results[feature] = when (feature) {
+                    OperationOrder.Feature.HOTSPOT -> setHotspot(hotspot == true, valid)
+                    OperationOrder.Feature.MOBILE_DATA -> setMobileData(mobileData == true)
+                }
             }
-            TransactionResult(hotspotResult, mobileResult, screenAwake = true, lockedAtEnd = false)
+            TransactionResult(
+                hotspot = results[OperationOrder.Feature.HOTSPOT],
+                mobileData = results[OperationOrder.Feature.MOBILE_DATA],
+                screenAwake = true,
+                lockedAtEnd = false
+            )
         }
     }
 

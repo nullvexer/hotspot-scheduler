@@ -119,6 +119,35 @@ With a routine from 02:00 to 03:00 that wants hotspot and mobile data on:
 No interaction required. Setup has **Both ON** / **Both OFF** live-test buttons that exercise
 exactly this path, so the behaviour can be checked without waiting for an alarm.
 
+## Operation order matters
+
+An internet-sharing hotspot needs an upstream. Turning the hotspot on before mobile data leaves a
+network with no internet, and on a Galaxy A22 that frequently means the hotspot refuses to start at
+all. So `OperationOrder` decides the sequence:
+
+```
+turning ON :  mobile data ON  -> verify -> hotspot ON  -> verify
+turning OFF :  hotspot OFF     -> verify -> mobile data OFF -> verify
+```
+
+Only operations the user actually requested are included — a routine that wants just the hotspot
+never touches mobile data. A unit test asserts that no unrequested feature ever appears in a plan.
+
+## PIN keypad geometry is validated, never guessed
+
+There is no `screenHeight * 0.8` fallback any more. Tap positions are derived from the keypad that was
+actually detected, and `KeypadGeometryValidator` refuses to produce coordinates unless the layout
+really looks like a numeric keypad:
+
+- all ten digits `0..9` present
+- exactly 3 columns and 4 rows
+- `1` left of `2`, `1` above `4`, `0` below `8` (catches a mirrored or scrambled pad)
+- no overlapping keys
+- every key in the lower part of the screen, and of plausible button size
+
+If validation fails the automation **skips the PIN** rather than guessing. That asymmetry is
+deliberate: a skipped run costs nothing, a wrong digit costs a failed credential attempt and then a
+five-minute backoff — which is exactly the "I pressed Diagnose and nothing happened" symptom.
 ## Failure discipline
 
 This is the part that matters most. Android counts wrong credential attempts, and some devices

@@ -72,29 +72,11 @@ object KeyguardIds {
     )
 
     /**
-     * Coordinates of the num pad as fractions of screen size, used only when no node can be
-     * found and clicked. A 4x3 grid: 1 2 3 / 4 5 6 / 7 8 9 / (blank) 0 (enter).
+     * Rows to try when a swipe does not reveal the keypad (some ROMs need a tap first).
      *
-     * These are fractions rather than pixels because they must survive different screen sizes and
-     * status/nav bar insets. They are calibrated to the middle of each key cell, and are only ever
-     * used as a last resort.
+     * Note there is deliberately NO digit position table here any more. Key coordinates are derived
+     * from the detected keypad by KeypadGeometryValidator; a hard-coded fraction is a guess, and a
+     * guessed key on a lock screen is a failed credential attempt.
      */
-    fun digitGridFraction(digit: Int): Pair<Float, Float> {
-        require(digit in 0..9) { "not a digit: $digit" }
-        return when (digit) {
-            1 -> 0.25f to 0.30f
-            2 -> 0.50f to 0.30f
-            3 -> 0.75f to 0.30f
-            4 -> 0.25f to 0.42f
-            5 -> 0.50f to 0.42f
-            6 -> 0.75f to 0.42f
-            7 -> 0.25f to 0.54f
-            8 -> 0.50f to 0.54f
-            9 -> 0.75f to 0.54f
-            else -> 0.50f to 0.66f
-        }
-    }
-
-    /** Rows to try when a swipe does not reveal the keypad (some ROMs need a tap first). */
     fun swipeFraction(): Triple<Float, Float, Float> = Triple(0.5f, 0.85f, 0.15f)
 }
