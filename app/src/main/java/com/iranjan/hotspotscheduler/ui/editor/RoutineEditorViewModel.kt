@@ -153,10 +153,3 @@ private fun formatCapText(capMb: Long): String =
 private fun trimTrailingZeros(value: String): String =
     value.trimEnd('0').trimEnd('.')
 
-/**
- * Validates a candidate passphrase with the same rule the Shizuku engine applies
- * (HotspotCommands.validPassphrase). Kept public so the editor screen and the unit tests share
- * exactly one definition of "usable password".
- */
-fun isUsablePassphrase(password: String): Boolean =
-    password.length in 8..63 && password.all { it.code in 32..126 }

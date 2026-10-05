@@ -1,15 +1,12 @@
 package com.iranjan.hotspotscheduler.accessibility
 
-import android.app.KeyguardManager
 import android.content.Context
-import android.os.PowerManager
-import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import com.iranjan.hotspotscheduler.data.model.CalibrationSignature
 import com.iranjan.hotspotscheduler.data.prefs.AutomationPrefs
 import com.iranjan.hotspotscheduler.service.NotificationHelper
-import com.iranjan.hotspotscheduler.toggle.HotspotCommands
-import com.iranjan.hotspotscheduler.toggle.ShizukuEngine
+import com.iranjan.hotspotscheduler.util.PassphraseRules
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -20,7 +17,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class ToggleResult { ALREADY_OK, TOGGLED, FAILED }
+enum class ToggleResult { ALREADY_OK, TOGGLED, FAILED, BLOCKED }
 
 interface HotspotController {
     suspend fun readHotspotState(): Boolean?
@@ -29,198 +26,70 @@ interface HotspotController {
     suspend fun requestCalibrationDump()
 }
 
+/**
+ * Drives the Settings UI through the accessibility service. This is the only toggle engine.
+ *
+ * A toggle is a single sequence with escalating stages, and each stage only stops the sequence on
+ * a definitive result:
+ *
+ *  0. The target switch is already on screen and readable -> click it, verify, retry once.
+ *  1. Turn the screen on and dismiss a non-secure keyguard.
+ *  2. Launch the Settings screen and navigate to it.
+ *  3. Ask the user to unlock, then poll until they have or the deadline passes.
+ *
+ * `BLOCKED` means "the app cannot do this on its own" (a secure lock screen) and is distinct from
+ * `FAILED` so the caller can tell the user something actionable instead of a generic failure.
+ */
 @Singleton
 class AccessibilityHotspotControllerImpl @Inject constructor(
     @ApplicationContext private val context: Context,
     private val prefs: AutomationPrefs,
     private val notifications: NotificationHelper,
     private val navigator: HotspotNavigator,
-    private val shizuku: ShizukuEngine
+    private val screen: ScreenControl
 ) : HotspotController {
 
-    private val powerManager: PowerManager? = context.getSystemService(PowerManager::class.java)
-    private val keyguardManager: KeyguardManager? = context.getSystemService(KeyguardManager::class.java)
-
     /**
-     * Serializes every toggle. This is a @Singleton whose keyguardLock is process-global:
-     * without this, a "turn off now" launched from a notification could restore the
-     * keyguard underneath an in-flight boundary toggle (or vice versa), and two concurrent
-     * attempts would both drive the same Settings tree.
+     * Serialises every toggle. This is a @Singleton holding a KeyguardLock; without this a
+     * "turn off now" from the shade could restore the keyguard underneath an in-flight boundary
+     * toggle, and two attempts would drive the same Settings tree at once.
      */
     private val toggleLock = Mutex()
-    private var keyguardLock: KeyguardManager.KeyguardLock? = null
 
-    override suspend fun readHotspotState(): Boolean? = shizukuReadState() ?: accessibilityReadHotspotState()
-
-    private suspend fun shizukuReadState(): Boolean? {
-        if (!shizuku.isReady()) return null
-        return try {
-            shizuku.hotspotState()?.on
-        } catch (t: Throwable) {
-            null
-        }
-    }
-
-    private suspend fun accessibilityReadHotspotState(): Boolean? {
-        val service = AccessibilityServiceHolder.service ?: return null
+    override suspend fun readHotspotState(): Boolean? = withContext(Dispatchers.Default) {
+        val service = AccessibilityServiceHolder.service ?: return@withContext null
+        val root = service.rootNode() ?: return@withContext null
+        if (!isSettingsPackage(root)) return@withContext null
         val calibration = prefs.calibration()
-        return withContext(Dispatchers.Default) {
-            val root = service.rootNode()
-            if (root == null || root.packageName?.toString() != SETTINGS_PACKAGE) return@withContext null
-            val match = NodeMatcher.findToggle(root, calibration, KEYWORD_HOTSPOT) ?: return@withContext null
-            NodeMatcher.readState(match)
-        }
+        val match = NodeMatcher.findToggle(root, calibration, KEYWORD_HOTSPOT) ?: return@withContext null
+        NodeMatcher.readState(match)
     }
 
     override suspend fun setHotspotState(targetOn: Boolean, password: String?): ToggleResult =
         toggleLock.withLock { setHotspotStateLocked(targetOn, password) }
 
     private suspend fun setHotspotStateLocked(targetOn: Boolean, password: String?): ToggleResult {
-        if (shizuku.isReady() && shizuku.hotspotCommandSupported()) {
-            AttemptLog.add("engine=shizuku hotspot target=$targetOn")
-            val result = withTimeoutOrNull(SHIZUKU_TIMEOUT_MS) {
-                shizukuToggleHotspot(targetOn, password)
-            }
-            if (result == null) AttemptLog.add("shizuku hotspot timed out after ${SHIZUKU_TIMEOUT_MS}ms")
-            if (result != null) return result
-            AttemptLog.add("shizuku hotspot failed; falling back to accessibility")
-        } else {
-            AttemptLog.add("engine=accessibility (shizuku not ready or command unsupported)")
+        val validPassword = password?.takeIf { PassphraseRules.isValid(it) }
+        if (password != null && validPassword == null) {
+            AttemptLog.add(
+                "routine password rejected by WPA2 rules " +
+                    "(${PassphraseRules.rejectionReason(password)}); keeping the current password"
+            )
         }
         val result = withTimeoutOrNull(TOTAL_TIMEOUT_MS) {
-            runToggle(KEYWORD_HOTSPOT, targetOn, useCalibration = true, password = password)
+            runToggle(KEYWORD_HOTSPOT, targetOn, useCalibration = true, password = validPassword)
         } ?: ToggleResult.FAILED
+
         AttemptLog.add("HOTSPOT target=$targetOn -> $result")
-        if (result == ToggleResult.FAILED) {
-            Log.e(TAG, "hotspot toggle failed targetOn=$targetOn")
-        } else {
-            prefs.setLastKnownHotspotOn(targetOn)
-        }
-        return result
-    }
-
-    /**
-     * Shizuku path. The `cmd wifi start-softap` config is session-only and cannot reuse
-     * the saved Settings config (dumpsys masks the passphrase), so:
-     *  - learn & cache SSID/security from the live dumpsys state;
-     *  - use the routine password (validated >=8 chars) or the cached passphrase;
-     *  - verify the resulting state after every command.
-     * Returns null when Shizuku failed and the caller should fall back to accessibility.
-     */
-    private suspend fun shizukuToggleHotspot(targetOn: Boolean, password: String?): ToggleResult? {
-        val state = try { shizuku.hotspotState() } catch (t: Throwable) { null }
-        if (state != null) {
-            if (state.on == targetOn) {
-                AttemptLog.add("shizuku: hotspot already ${if (targetOn) "on" else "off"}")
-                prefs.setLastKnownHotspotOn(targetOn)
-                return ToggleResult.ALREADY_OK
-            }
-        }
-
-        if (!targetOn) {
-            val ok = shizuku.setHotspot(false, null, null)
-            val verified = verifyState(expectedOn = false)
-            return if (ok || verified == false) {
-                prefs.setLastKnownHotspotOn(false)
-                ToggleResult.TOGGLED
-            } else {
-                AttemptLog.add("shizuku stop-softap did not take effect")
-                null
-            }
-        }
-
-        // Learn & cache SSID/security from the live dump whenever available. Read the cache
-        // FIRST and carry the known passphrase across: setApConfig(ssid, null, ..) blanks it,
-        // which would leave a secured hotspot with no way to start it.
-        val cached = prefs.apConfig()
-        val ssid = state?.ssid ?: cached.ssid ?: HotspotCommands.DEFAULT_SSID
-        val knownOpen = state?.open ?: if (cached.ssid != null) cached.open else false
-        if (state?.ssid != null) {
-            prefs.setApConfig(state.ssid, cached.passphrase, state.open == true)
-        }
-
-        if (knownOpen) {
-            // The user's hotspot is an open network; start it the same way.
-            val started = shizuku.setHotspot(true, ssid, null, openNetwork = true)
-            val verified = verifyState(expectedOn = true)
-            return if (started || verified == true) {
-                prefs.setLastKnownHotspotOn(true)
-                ToggleResult.TOGGLED
-            } else {
-                AttemptLog.add("shizuku open-network start did not take effect")
-                null
-            }
-        }
-
-        val candidatePassphrases = buildList {
-            if (password != null && HotspotCommands.validPassphrase(password)) add(password)
-            cached.passphrase?.takeIf { HotspotCommands.validPassphrase(it) }?.let { add(it) }
-        }
-        if (candidatePassphrases.isEmpty()) {
-            AttemptLog.add("shizuku: no valid passphrase available; cannot start secured hotspot")
-            return null
-        }
-
-        var lastStarted = false
-        var startedPass: String? = null
-        for (pass in candidatePassphrases) {
-            val started = shizuku.setHotspot(true, ssid, pass)
-            if (started) {
-                lastStarted = true
-                startedPass = pass
-                break
-            }
-        }
-        val verified = verifyState(expectedOn = true)
-        return when {
-            lastStarted || verified == true -> {
-                prefs.setApConfig(ssid, startedPass ?: candidatePassphrases.firstOrNull(), false)
-                prefs.setLastKnownHotspotOn(true)
-                ToggleResult.TOGGLED
-            }
-            else -> {
-                AttemptLog.add("shizuku start-softap did not take effect")
-                null
-            }
-        }
-    }
-
-    private suspend fun verifyState(expectedOn: Boolean): Boolean? {
-        var result: Boolean? = null
-        var attempts = 0
-        while (attempts < 5) {
-            delay(600)
-            val probe = try { shizuku.hotspotState() } catch (t: Throwable) { null }
-            if (probe != null) {
-                result = probe.on
-                if (probe.on == expectedOn) return probe.on
-            }
-            attempts++
+        when (result) {
+            ToggleResult.FAILED -> Log.e(TAG, "hotspot toggle failed targetOn=$targetOn")
+            ToggleResult.BLOCKED -> notifications.notifyUnlockRequired()
+            else -> prefs.setLastKnownHotspotOn(targetOn)
         }
         return result
     }
 
     override suspend fun setMobileData(targetOn: Boolean): ToggleResult = toggleLock.withLock {
-        if (shizuku.isReady()) {
-            val state = shizuku.mobileDataState()
-            if (state == targetOn) {
-                AttemptLog.add("MOBILE DATA target=$targetOn -> ALREADY_OK (shizuku)")
-                return@withLock ToggleResult.ALREADY_OK
-            }
-            val toggled = withTimeoutOrNull(SHIZUKU_TIMEOUT_MS) {
-                val ok = shizuku.mobileData(targetOn)
-                val after = shizuku.mobileDataState()
-                // A null read is UNKNOWN, not confirmation: `svc data` can exit 0 and do nothing.
-                if (ok && after == targetOn) ToggleResult.TOGGLED else null
-            }
-            if (toggled != null) {
-                AttemptLog.add("MOBILE DATA target=$targetOn -> TOGGLED (shizuku)")
-                return@withLock toggled
-            }
-            AttemptLog.add("shizuku mobile data unverified or timed out; falling back to accessibility")
-        } else {
-            AttemptLog.add("engine=accessibility (shizuku not ready)")
-        }
         val result = withTimeoutOrNull(TOTAL_TIMEOUT_MS) {
             runToggle(KEYWORD_MOBILE_DATA, targetOn, useCalibration = false, password = null)
         } ?: ToggleResult.FAILED
@@ -230,56 +99,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
     }
 
     override suspend fun requestCalibrationDump() {
-        val service = AccessibilityServiceHolder.service ?: return
-        service.emitCalibrationDump()
-    }
-
-    private fun isUnlocked(): Boolean {
-        // Fail closed: acting on a screen the user cannot see is worse than falling through
-        // to the manual-prompt tier, which tells them what happened.
-        val pm = powerManager ?: return false
-        if (!pm.isInteractive) return false
-        val km = keyguardManager ?: return false
-        return !km.isKeyguardLocked
-    }
-
-    private fun wakeAndDisableKeyguard() {
-        val pm = powerManager ?: return
-        if (!pm.isInteractive) {
-            AttemptLog.add("screen off; waking")
-            try {
-                val wl = pm.newWakeLock(
-                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                    "HSAuto:wake"
-                )
-                wl.acquire(30_000L)
-            } catch (t: Throwable) {
-                AttemptLog.add("wake failed: ${t.message}")
-            }
-        }
-        val km = keyguardManager ?: return
-        if (km.isKeyguardLocked) {
-            val secure = try {
-                km.isKeyguardSecure
-            } catch (t: Throwable) {
-                false
-            }
-            AttemptLog.add("keyguard locked (secure=$secure); disabling non-secure lock")
-            try {
-                keyguardLock?.reenableKeyguard()
-                keyguardLock = km.newKeyguardLock("HSAuto").also { it.disableKeyguard() }
-            } catch (t: Throwable) {
-                AttemptLog.add("keyguard disable failed: ${t.message}")
-            }
-        }
-    }
-
-    private fun restoreKeyguard() {
-        try {
-            keyguardLock?.reenableKeyguard()
-        } catch (t: Throwable) {
-        }
-        keyguardLock = null
+        AccessibilityServiceHolder.service?.emitCalibrationDump()
     }
 
     private suspend fun runToggle(
@@ -291,7 +111,8 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         try {
             return runToggleInner(rowKeyword, targetOn, useCalibration, password)
         } finally {
-            restoreKeyguard()
+            // Never leave the screen on because of a toggle that ended early.
+            settleScreen()
         }
     }
 
@@ -301,51 +122,111 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         useCalibration: Boolean,
         password: String?
     ): ToggleResult {
-        AttemptLog.add("=== toggle $rowKeyword target=$targetOn start")
+        AttemptLog.add("=== toggle $rowKeyword target=$targetOn start; ${screen.capabilities()}")
+
+        // Stage 0: the switch may already be on screen (app left in Settings, user is awake).
         settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
-        wakeAndDisableKeyguard()
-        delay(1_500)
+        // Stage 1: wake the screen and try to clear a non-secure keyguard.
+        screen.wakeScreen(WAKE_HOLD_MS)
+        screen.dismissKeyguardIfPermitted()
+        delay(SETTLE_DELAY_MS)
         settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
 
-        var launched = false
-        if (isUnlocked() && Settings.canDrawOverlays(context)) {
-            launched = launchFor(rowKeyword)
+        // Stage 2: launch Settings and navigate. Background activity starts are restricted, so a
+        // wake lock alone is not always enough to open the screen.
+        screen.wakeScreen(WAKE_HOLD_MS)
+        if (!screen.isLocked()) {
+            launchFor(rowKeyword)
             awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
             settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
             navigateFor(rowKeyword, useCalibration)
             settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-            logScreenDump(rowKeyword)
+            AttemptLog.add("gave up after launching Settings for '$rowKeyword'")
             return ToggleResult.FAILED
         }
 
-        if (!isUnlocked()) {
-            AttemptLog.add("device locked; waiting up to ${MANUAL_WAIT_MS / 1000}s for unlock (secure PIN cannot be bypassed)")
-        }
-        notifications.postOpenHotspotSettingsPrompt()
-        val deadline = System.currentTimeMillis() + MANUAL_WAIT_MS
-        var iterations = 0
-        while (System.currentTimeMillis() < deadline) {
-            if (!launched && isUnlocked() && Settings.canDrawOverlays(context)) {
-                launched = launchFor(rowKeyword)
-            }
-            settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
-            iterations++
-            if (iterations % 8 == 0) {
-                navigateFor(rowKeyword, useCalibration)
-            }
-            delay(500)
-        }
-        logScreenDump(rowKeyword)
-        return ToggleResult.FAILED
+        // Stage 3: the screen is locked.
+        return awaitManualUnlock(rowKeyword, targetOn, useCalibration, password)
     }
 
     /**
-     * A definitive result from [attempt] stops the ladder; FAILED must not, or a single
-     * un-tappable click would skip wake/unlock, launch+navigate and the manual prompt.
+     * A secure lock screen cannot be automated: Android does not allow any app to enter a PIN,
+     * pattern or password, and `disableKeyguard()` is ignored while a secure lock is set. So the
+     * app wakes the screen, explains the situation, and waits for the user.
+     *
+     * A non-secure lock is not a reason to wait, so if the keyguard clears we resume automation.
      */
+    private suspend fun awaitManualUnlock(
+        rowKeyword: String,
+        targetOn: Boolean,
+        useCalibration: Boolean,
+        password: String?
+    ): ToggleResult {
+        if (!screen.secureLockPresent()) {
+            // Locked but not secure: keep trying to dismiss it and to launch Settings.
+            val deadline = System.currentTimeMillis() + UNLOCK_GRACE_MS
+            while (System.currentTimeMillis() < deadline) {
+                screen.wakeScreen(WAKE_HOLD_MS)
+                screen.dismissKeyguardIfPermitted()
+                if (!screen.isLocked()) {
+                    launchFor(rowKeyword)
+                    awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
+                    settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+                    navigateFor(rowKeyword, useCalibration)
+                    settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+                    return ToggleResult.FAILED
+                }
+                delay(500)
+            }
+            AttemptLog.add("non-secure keyguard would not clear")
+            return ToggleResult.FAILED
+        }
+
+        AttemptLog.add("secure lock screen: Android does not permit automated unlock; notifying the user")
+        notifications.notifyUnlockRequired()
+        val deadline = System.currentTimeMillis() + MANUAL_WAIT_MS
+        var iterations = 0
+        while (System.currentTimeMillis() < deadline) {
+            if (!screen.isLocked()) {
+                AttemptLog.add("user unlocked; resuming automation")
+                launchFor(rowKeyword)
+                awaitScreen(rowKeyword, useCalibration, SCREEN_WAIT_MS)
+                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+                navigateFor(rowKeyword, useCalibration)
+                settle(attempt(rowKeyword, targetOn, useCalibration, password))?.let { return it }
+                return ToggleResult.FAILED
+            }
+            screen.wakeScreen(WAKE_HOLD_MS)
+            iterations++
+            if (iterations % NAVIGATE_EVERY == 0) navigateFor(rowKeyword, useCalibration)
+            delay(500)
+        }
+        AttemptLog.add("still locked after ${MANUAL_WAIT_MS / 1000}s; giving up")
+        return ToggleResult.BLOCKED
+    }
+
+    /** Only a definitive result stops the ladder; FAILED means "try the next stage". */
     private fun settle(result: ToggleResult?): ToggleResult? =
-        if (result != null && result != ToggleResult.FAILED) result else null
+        when (result) {
+            null, ToggleResult.FAILED -> null
+            else -> result
+        }
+
+    /**
+     * Restores the screen afterwards: turns it back off if we turned it on, unless the user is
+     * actively using the phone or the toggle failed and the screen is still needed.
+     */
+    private suspend fun settleScreen() {
+        if (!turnScreenOffAfterToggle) return
+        delay(POST_TOGGLE_SETTLE_MS)
+        when {
+            !screen.isInteractive() -> Unit
+            screen.isLocked() -> Unit
+            !screen.lockNow() -> AttemptLog.add("screen left on: device administrator is not enabled")
+            else -> delay(POST_LOCK_SETTLE_MS)
+        }
+    }
 
     private suspend fun navigateFor(rowKeyword: String, useCalibration: Boolean): Boolean {
         val calibration = if (useCalibration) prefs.calibration() else null
@@ -362,7 +243,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
                 row.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             }
             AttemptLog.add("clicked '$label' to navigate")
-            delay(1_800)
+            delay(NAVIGATE_DELAY_MS)
             if (findToggle(rowKeyword, calibration) != null) return true
         }
         return false
@@ -382,7 +263,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             navigator.launchDataUsageSettings()
         }
         val root = rootNode()
-        AttemptLog.add("launched=${launched} screen=${root?.className} pkg=${root?.packageName}")
+        AttemptLog.add("launched=$launched screen=${root?.className} pkg=${root?.packageName}")
         return launched
     }
 
@@ -407,9 +288,9 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         AttemptLog.add("match=${match.source}")
 
         if (password != null && targetOn && rowKeyword == KEYWORD_HOTSPOT) {
-            // Only touch the password field when it is already on screen. Navigating to the
-            // config screen from here would move away from the switch we just matched, and
-            // the routine would then fail *because* it carries a password.
+            // Only touch the password field when it is already on screen. Navigating to the config
+            // screen from here would move away from the switch we just matched, and the routine
+            // would then fail *because* it carries a password.
             applyPassword(password, allowNavigation = openedConfig)
             match = findToggle(rowKeyword, calibration) ?: return null
         }
@@ -446,6 +327,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
                 }
             }
         }
+        logScreenDump(rowKeyword)
         return ToggleResult.FAILED
     }
 
@@ -454,7 +336,6 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             NodeMatcher.findPasswordEditor(settingsRoot())
         }
         if (editor == null && allowNavigation) {
-            Log.i(TAG, "password field not on screen; opening hotspot config screen")
             openHotspotConfigScreen()
             editor = withContext(Dispatchers.Default) {
                 NodeMatcher.findPasswordEditor(settingsRoot())
@@ -480,13 +361,13 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             row.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
         AttemptLog.add("clicked hotspot row to open config screen")
-        val opened = awaitPasswordField(6_000L)
+        val opened = awaitPasswordField(CONFIG_WAIT_MS)
         AttemptLog.add("config screen with password field=$opened")
     }
 
     private suspend fun findToggle(
         rowKeyword: String,
-        calibration: com.iranjan.hotspotscheduler.data.model.CalibrationSignature?
+        calibration: CalibrationSignature?
     ): ToggleMatch? {
         val service = AccessibilityServiceHolder.service ?: run {
             AttemptLog.add("accessibility service not connected")
@@ -496,7 +377,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
             val root = service.rootNode()
             when {
                 root == null -> null
-                root.packageName?.toString() != SETTINGS_PACKAGE -> {
+                !isSettingsPackage(root) -> {
                     AttemptLog.add("ignoring own window; waiting for settings")
                     null
                 }
@@ -507,7 +388,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
 
     private suspend fun settingsRoot(): AccessibilityNodeInfo? = withContext(Dispatchers.Default) {
         val root = rootNode() ?: return@withContext null
-        if (root.packageName?.toString() != SETTINGS_PACKAGE) null else root
+        if (!isSettingsPackage(root)) null else root
     }
 
     private suspend fun awaitPasswordField(timeoutMs: Long): Boolean {
@@ -526,7 +407,7 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
     private suspend fun awaitStateChange(
         before: Boolean,
         rowKeyword: String,
-        calibration: com.iranjan.hotspotscheduler.data.model.CalibrationSignature?
+        calibration: CalibrationSignature?
     ): Boolean {
         val deadline = System.currentTimeMillis() + STATE_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
@@ -548,13 +429,35 @@ class AccessibilityHotspotControllerImpl @Inject constructor(
         return false
     }
 
+    private fun isSettingsPackage(root: AccessibilityNodeInfo): Boolean {
+        val pkg = root.packageName?.toString() ?: return false
+        val ok = pkg == SETTINGS_PACKAGE || pkg == SAMSUNG_SETTINGS_PACKAGE
+        if (!ok) AttemptLog.add("unexpected window: $pkg")
+        return ok
+    }
+
     companion object {
         const val SETTINGS_PACKAGE = "com.android.settings"
+        const val SAMSUNG_SETTINGS_PACKAGE = "com.samsung.android.settings"
         private const val TAG = "HSAuto"
         private const val STATE_TIMEOUT_MS = 3_000L
         private const val SCREEN_WAIT_MS = 6_000L
-        private const val MANUAL_WAIT_MS = 180_000L
-        private const val TOTAL_TIMEOUT_MS = 200_000L
-        private const val SHIZUKU_TIMEOUT_MS = 60_000L
+        private const val CONFIG_WAIT_MS = 6_000L
+        private const val MANUAL_WAIT_MS = 120_000L
+        private const val UNLOCK_GRACE_MS = 15_000L
+        private const val TOTAL_TIMEOUT_MS = 180_000L
+        private const val WAKE_HOLD_MS = 120_000L
+        private const val SETTLE_DELAY_MS = 1_200L
+        private const val NAVIGATE_DELAY_MS = 1_800L
+        private const val NAVIGATE_EVERY = 8
+        private const val POST_TOGGLE_SETTLE_MS = 1_200L
+        private const val POST_LOCK_SETTLE_MS = 400L
+
+        /**
+         * Set from the Setup screen. When true, a completed toggle turns the screen back off via
+         * the device administrator, provided the user was not already using the phone.
+         */
+        @Volatile
+        var turnScreenOffAfterToggle: Boolean = true
     }
 }

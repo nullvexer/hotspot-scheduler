@@ -151,6 +151,40 @@ class NotificationHelper @Inject constructor(
         )
     }
 
+    /**
+     * Told when a scheduled toggle cannot proceed because a secure lock screen is set. Android
+     * does not let any app enter a PIN, pattern or password, so this is not a transient failure:
+     * the action that actually helps is removing the lock credential or trusting the place.
+     */
+    fun notifyUnlockRequired() {
+        val openSetup = PendingIntent.getActivity(
+            context,
+            23,
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        nm?.notify(
+            ID_UNLOCK_REQUIRED,
+            NotificationCompat.Builder(context, CHANNEL_ALERTS)
+                .setSmallIcon(R.drawable.ic_app_icon)
+                .setContentTitle(context.getString(R.string.notif_unlock_required_title))
+                .setContentText(context.getString(R.string.notif_unlock_required_text))
+                .setStyle(
+                    NotificationCompat.BigTextStyle()
+                        .bigText(context.getString(R.string.notif_unlock_required_text))
+                )
+                .setAutoCancel(true)
+                .addAction(
+                    0,
+                    context.getString(R.string.notif_unlock_required_action),
+                    openSetup
+                )
+                .setContentIntent(openSetup)
+                .build()
+        )
+    }
+
     fun postOpenHotspotSettingsPrompt() {
         val pi = PendingIntent.getActivity(
             context,
@@ -209,5 +243,6 @@ class NotificationHelper @Inject constructor(
         const val ID_CAP = 3
         const val ID_ACC = 4
         const val ID_OPEN_PROMPT = 5
+        const val ID_UNLOCK_REQUIRED = 6
     }
 }

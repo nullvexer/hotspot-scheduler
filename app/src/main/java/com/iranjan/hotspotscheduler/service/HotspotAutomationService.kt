@@ -16,7 +16,6 @@ import com.iranjan.hotspotscheduler.data.usage.UsageSample
 import com.iranjan.hotspotscheduler.util.AccessibilityUtils
 import com.iranjan.hotspotscheduler.util.Formatters
 import com.iranjan.hotspotscheduler.accessibility.AttemptLog
-import com.iranjan.hotspotscheduler.toggle.ShizukuEngine
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -38,7 +37,6 @@ class HotspotAutomationService : LifecycleService() {
     @Inject lateinit var controller: HotspotController
     @Inject lateinit var notifications: NotificationHelper
     @Inject lateinit var alarmScheduler: AlarmScheduler
-    @Inject lateinit var shizuku: ShizukuEngine
 
     private val wake = Channel<Unit>(Channel.CONFLATED)
 
@@ -110,8 +108,7 @@ class HotspotAutomationService : LifecycleService() {
     private suspend fun tick() {
         val now = System.currentTimeMillis()
         val zone = ZoneId.systemDefault()
-        val shizukuReady = shizuku.isReady()
-        val accOk = AccessibilityUtils.isServiceEnabled(applicationContext) || shizukuReady
+        val accOk = AccessibilityUtils.isServiceEnabled(applicationContext)
         if (!accOk) {
             val lastAlert = prefs.lastAccAlertMs.first()
             if (now - lastAlert > ACC_ALERT_COOLDOWN_MS) {

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lets the Diagnostics screen share the diagnostics log without exposing the whole files dir. -->
+<paths>
+    <files-path
+        name="diagnostics"
+        path="." />
+</paths>

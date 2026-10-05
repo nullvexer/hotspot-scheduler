@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  flagReportViewIds is required to read switch_widget / switch_text by resource id.
+  flagRetrieveInteractiveWindows lets the service see which window is in the foreground.
+
+  Both Settings packages are listed: on some One UI builds the tethering and data screens resolve
+  under com.samsung.android.settings. Restricting the filter to only com.android.settings meant
+  onAccessibilityEvent never fired on those builds and every toggle logged "ignoring own window".
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
@@ -6,4 +14,4 @@
     android:canRetrieveWindowContent="true"
     android:description="@string/acc_service_description"
     android:notificationTimeout="100"
-    android:packageNames="com.android.settings" />
+    android:packageNames="com.android.settings,com.samsung.android.settings" />

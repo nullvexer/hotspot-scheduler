@@ -48,6 +48,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.iranjan.hotspotscheduler.R
 import com.iranjan.hotspotscheduler.core.RoutineEvaluator
 import com.iranjan.hotspotscheduler.ui.common.dayLabels
+import com.iranjan.hotspotscheduler.util.PassphraseRules
 
 @Composable
 fun RoutineEditorScreen(
@@ -66,7 +67,7 @@ fun RoutineEditorScreen(
     // Must match HotspotCommands.validPassphrase (8..63 printable ASCII). The old check was only
 // "length < 8", so a 100-char or non-ASCII password was accepted, encrypted, stored, and then
 // silently ignored by the Shizuku engine at toggle time.
-val passwordInvalid = draft.hotspotPassword.isNotEmpty() && !isUsablePassphrase(draft.hotspotPassword)
+val passwordInvalid = draft.hotspotPassword.isNotEmpty() && !PassphraseRules.isValid(draft.hotspotPassword)
 
     Column(
         modifier = Modifier

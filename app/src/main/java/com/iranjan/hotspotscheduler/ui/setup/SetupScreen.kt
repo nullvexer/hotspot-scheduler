@@ -17,8 +17,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -48,9 +46,9 @@ fun SetupScreen(
     onCalibrate: () -> Unit,
     viewModel: SetupViewModel = hiltViewModel()
 ) {
-    val state by viewModel.state.collectAsState()
+val state by viewModel.state.collectAsState()
     val testRunning by viewModel.testRunning.collectAsState()
-    val shizukuStatus by viewModel.shizuku.collectAsState()
+    val screenOffAfter by viewModel.screenOffAfter.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var diagnostics by remember { mutableStateOf(com.iranjan.hotspotscheduler.accessibility.AttemptLog.snapshot()) }
@@ -92,50 +90,97 @@ fun SetupScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineSmall)
+Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineSmall)
 
+        SetupCard(
+            title = stringResource(R.string.engine_title),
+            description = stringResource(R.string.engine_desc),
+            granted = state.accessibility,
+            actionLabel = stringResource(R.string.engine_open)
+        ) {
+            open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
+        // A secure lock is the one thing that makes unattended operation impossible, so it is
+        // called out separately and first among the blockers.
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(stringResource(R.string.shizuku_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Text(
+                        stringResource(R.string.lock_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
                     AssistChip(
                         onClick = {},
                         label = {
-                            val statusText = when {
-                                shizukuStatus.granted -> stringResource(R.string.shizuku_status_ready)
-                                shizukuStatus.running -> stringResource(R.string.shizuku_status_running)
-                                shizukuStatus.installed -> stringResource(R.string.shizuku_status_stopped)
-                                else -> stringResource(R.string.shizuku_status_missing)
-                            }
                             Text(
-                                statusText,
-                                color = if (shizukuStatus.granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                if (state.secureLock) "PIN / password" else "No credential",
+                                color = if (state.secureLock) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
                             )
                         }
                     )
                 }
-                Text(stringResource(R.string.shizuku_desc), style = MaterialTheme.typography.bodyMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!shizukuStatus.installed) {
-                        Button(onClick = {
-                            val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=moe.shizuku.privileged.api"))
-                            try {
-                                context.startActivity(market)
-                            } catch (t: Throwable) {
-                                open(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api")))
-                            }
-                        }) {
-                            Text(stringResource(R.string.shizuku_install))
-                        }
+                Text(
+                    stringResource(
+                        if (state.secureLock) R.string.lock_secure_warning else R.string.lock_no_credential
+                    ),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (state.secureLock) {
+                    Button(onClick = { open(viewModel.lockScreenSettingsIntent()) }) {
+                        Text(stringResource(R.string.lock_remove))
                     }
-                    if (shizukuStatus.running && !shizukuStatus.granted) {
-                        Button(onClick = { viewModel.requestShizukuPermission() }) {
-                            Text(stringResource(R.string.shizuku_grant))
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        stringResource(R.string.device_admin_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    AssistChip(
+                        onClick = {},
+                        label = {
+                            Text(
+                                if (state.deviceAdmin) "On" else "Off",
+                                color = if (state.deviceAdmin) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.error
+                                }
+                            )
+                        }
+                    )
+                }
+                Text(stringResource(R.string.device_admin_desc), style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!state.deviceAdmin) {
+                        Button(onClick = { open(viewModel.deviceAdminIntent()) }) {
+                            Text(stringResource(R.string.device_admin_enable))
                         }
                     }
                     OutlinedButton(onClick = { viewModel.refresh() }) {
-                        Text(stringResource(R.string.shizuku_check))
+                        Text(stringResource(R.string.setup_open))
                     }
+                }
+                Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    androidx.compose.material3.Switch(
+                        checked = screenOffAfter,
+                        onCheckedChange = { viewModel.setScreenOffAfter(it) }
+                    )
+                    Text(stringResource(R.string.screen_off_after), style = MaterialTheme.typography.bodyMedium)
                 }
             }
         }

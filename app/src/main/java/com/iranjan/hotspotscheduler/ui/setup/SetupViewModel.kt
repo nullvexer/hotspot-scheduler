@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.AlarmManager
 import android.app.AppOpsManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
@@ -14,12 +15,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.iranjan.hotspotscheduler.accessibility.AttemptLog
 import com.iranjan.hotspotscheduler.accessibility.HotspotController
+import com.iranjan.hotspotscheduler.accessibility.ScreenControl
 import com.iranjan.hotspotscheduler.data.repo.RoutineRepository
-import com.iranjan.hotspotscheduler.toggle.ShizukuEngine
 import com.iranjan.hotspotscheduler.util.AccessibilityUtils
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import rikka.shizuku.Shizuku
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -31,21 +31,20 @@ data class SetupState(
     val notifications: Boolean = false,
     val exactAlarms: Boolean = false,
     val battery: Boolean = false,
-    val overlay: Boolean = false
-)
-
-data class ShizukuStatus(
-    val installed: Boolean,
-    val running: Boolean,
-    val granted: Boolean
-)
+    val overlay: Boolean = false,
+    val deviceAdmin: Boolean = false,
+    val secureLock: Boolean = false
+) {
+    /** Everything the app needs in order to run unattended. */
+    val automationReady: Boolean get() = accessibility && !secureLock && deviceAdmin
+}
 
 @HiltViewModel
 class SetupViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val controller: HotspotController,
     private val repo: RoutineRepository,
-    private val shizukuEngine: ShizukuEngine
+    private val screen: ScreenControl
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SetupState())
@@ -54,59 +53,47 @@ class SetupViewModel @Inject constructor(
     private val _testRunning = MutableStateFlow(false)
     val testRunning: StateFlow<Boolean> = _testRunning
 
-    private val _shizuku = MutableStateFlow(ShizukuStatus(false, false, false))
-    val shizuku: StateFlow<ShizukuStatus> = _shizuku
-
-    private val permissionListener =
-        Shizuku.OnRequestPermissionResultListener { _, grantResult ->
-            _shizuku.value = shizukuStatus()
-            refresh()
-        }
+    private val _screenOffAfter = MutableStateFlow(true)
+    val screenOffAfter: StateFlow<Boolean> = _screenOffAfter
 
     init {
-        try {
-            Shizuku.addRequestPermissionResultListener(permissionListener)
-        } catch (t: Throwable) {
-        }
         refresh()
-    }
-
-    override fun onCleared() {
-        try {
-            Shizuku.removeRequestPermissionResultListener(permissionListener)
-        } catch (t: Throwable) {
-        }
-    }
-
-    private fun shizukuStatus(): ShizukuStatus = ShizukuStatus(
-        installed = isShizukuInstalled(),
-        running = shizukuEngine.isRunning(),
-        granted = shizukuEngine.hasPermission()
-    )
-
-    private fun isShizukuInstalled(): Boolean = try {
-        context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0) != null
-    } catch (t: Throwable) {
-        false
-    }
-
-    fun requestShizukuPermission() = try {
-        Shizuku.requestPermission(1001)
-    } catch (t: Throwable) {
-        AttemptLog.add("shizuku permission request failed: ${t.message}")
     }
 
     fun refresh() {
         val alarmManager = context.getSystemService(AlarmManager::class.java)
-        _state.value = SetupState(
+        val state = SetupState(
             accessibility = AccessibilityUtils.isServiceEnabled(context),
             usageAccess = hasUsageAccess(),
             notifications = notificationGranted(),
             exactAlarms = Build.VERSION.SDK_INT < 31 || alarmManager?.canScheduleExactAlarms() == true,
             battery = isIgnoringBattery(),
-            overlay = Settings.canDrawOverlays(context)
+            overlay = Settings.canDrawOverlays(context),
+            deviceAdmin = screen.hasDeviceAdmin(),
+            secureLock = screen.secureLockPresent()
         )
-        _shizuku.value = shizukuStatus()
+        _state.value = state
+        if (state.automationReady) {
+            AttemptLog.add("setup: ready for unattended operation; ${screen.capabilities()}")
+        } else {
+            val missing = buildList {
+                if (!state.accessibility) add("accessibility service")
+                if (state.secureLock) add("no secure lock (PIN/pattern/password)")
+                if (!state.deviceAdmin) add("device administrator for screen-off")
+            }
+            AttemptLog.add("setup: not unattended yet, missing: ${missing.joinToString()}")
+        }
+    }
+
+    fun deviceAdminIntent(): Intent = screen.deviceAdminIntent()
+
+    fun lockScreenSettingsIntent(): Intent = screen.lockScreenSettingsIntent()
+
+    fun setScreenOffAfter(enabled: Boolean) {
+        _screenOffAfter.value = enabled
+        com.iranjan.hotspotscheduler.accessibility.AccessibilityHotspotControllerImpl
+            .turnScreenOffAfterToggle = enabled
+        AttemptLog.add("screen-off after toggle = $enabled")
     }
 
     fun testHotspot(on: Boolean) = viewModelScope.launch {
@@ -115,7 +102,7 @@ class SetupViewModel @Inject constructor(
             val password = repo.enabledRoutines()
                 .firstOrNull { !it.hotspotPassword.isNullOrBlank() }?.hotspotPassword
             if (password != null) {
-                AttemptLog.add("live test: using password from an enabled routine")
+                AttemptLog.add("live test: using the password from an enabled routine")
             }
             controller.setHotspotState(on, password)
         } finally {

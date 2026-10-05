@@ -18,7 +18,6 @@
     <queries>
         <package android:name="com.android.settings" />
         <package android:name="com.samsung.android.settings" />
-        <package android:name="moe.shizuku.privileged.api" />
     </queries>
 
     <application
@@ -75,12 +74,30 @@
             android:exported="false" />
 
         <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:multiprocess="false"
-            android:enabled="true"
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Device administrator: used only for DevicePolicyManager.lockNow(), which is the
+             single public API that lets an app turn the screen off. -->
+        <receiver
+            android:name=".accessibility.ScreenOffAdminReceiver"
+            android:description="@string/device_admin_description"
             android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+            android:label="@string/device_admin_label"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policies" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name=".service.WidgetProvider"
