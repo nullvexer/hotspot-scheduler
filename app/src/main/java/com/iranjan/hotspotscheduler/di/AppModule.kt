@@ -44,6 +44,9 @@ import com.iranjan.hotspotscheduler.automation.strategies.NavigationStrategy
 import com.iranjan.hotspotscheduler.automation.strategies.SwitchFinder
 import com.iranjan.hotspotscheduler.automation.strategies.SamsungSettingsHotspotStrategy
 import com.iranjan.hotspotscheduler.automation.strategies.SamsungSettingsDataStrategy
+import com.iranjan.hotspotscheduler.automation.strategies.SamsungQuickSettingsHotspotStrategy
+import com.iranjan.hotspotscheduler.automation.strategies.SamsungQuickSettingsDataStrategy
+import com.iranjan.hotspotscheduler.automation.strategies.QuickSettingsNavigator
 import com.iranjan.hotspotscheduler.automation.strategies.NetworkOperationStrategy
 import com.iranjan.hotspotscheduler.platform.screen.WakeEngine
 import com.iranjan.hotspotscheduler.automation.logger.AutomationLogger
@@ -183,14 +186,21 @@ object AutomationModule {
     @Provides
     @Singleton
     fun provideHotspotStrategies(
-        samsungSettings: SamsungSettingsHotspotStrategy
-    ): List<NetworkOperationStrategy> = listOf(samsungSettings)
+        samsungSettings: SamsungSettingsHotspotStrategy,
+        samsungQS: SamsungQuickSettingsHotspotStrategy
+    ): List<NetworkOperationStrategy> = listOf(samsungSettings, samsungQS)
 
     @Provides
     @Singleton
     fun provideDataStrategies(
-        samsungData: SamsungSettingsDataStrategy
-    ): List<NetworkOperationStrategy> = listOf(samsungData)
+        samsungData: SamsungSettingsDataStrategy,
+        samsungQS: SamsungQuickSettingsDataStrategy
+    ): List<NetworkOperationStrategy> = listOf(samsungData, samsungQS)
+
+    @Provides
+    @Singleton
+    fun provideQuickSettingsNavigator(accessibility: AccessibilityRuntime): QuickSettingsNavigator =
+        QuickSettingsNavigator(accessibility)
 
     @Provides
     @Singleton
