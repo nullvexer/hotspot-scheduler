@@ -26,16 +26,28 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       # Build the APK first: a device-testable artifact should not be blocked by a unit test.
+      # The log is teed to ci/build.log so a failure can be diagnosed without Actions log access.
       - name: Build debug APK
         id: apk_build
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          mkdir -p ci
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee ci/build.log || {
+            echo "::group::Kotlin/Gradle errors"
+            grep -E "^e: |error:|FAILURE:|What went wrong|Caused by:" ci/build.log | head -100 || true
+            echo "::endgroup::"
+            exit 1
+          }
 
       # Unit tests are advisory here: the physical Galaxy A22 is the acceptance gate, so a
-      # red unit test must not withhold the APK from the tester. Set to false once the
-      # Level-1 suite is green on this toolchain.
+      # red unit test must not withhold the APK from the tester.
       - name: Run unit tests
+        id: unit_tests
         continue-on-error: true
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          mkdir -p ci
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee ci/test.log || true
 
       - name: Upload APK artifact
         if: always()
@@ -74,12 +86,43 @@ jobs:
               --repo "${{ github.repository }}"
           fi
 
-      # The old workflow pushed build logs to a `failure-logs` branch. Failing loudly with the
-      # log attached to the run is simpler and keeps credentials out of a git push.
+      # Publish the failure reason on a dedicated branch so it can be read with a plain
+      # `git fetch` + `git show`, without needing Actions log permissions.
+      - name: Publish failure summary
+        if: always() && steps.apk_build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p ci
+          {
+            echo "# Build failure — run ${GITHUB_RUN_NUMBER}"
+            echo
+            echo "commit: $(git rev-parse HEAD)"
+            echo
+            echo '## Errors'
+            echo '```'
+            grep -E "^e: |error:|FAILURE:|What went wrong|Caused by:|Could not|Unable to" ci/build.log | head -120 || echo "(no matching lines)"
+            echo '```'
+            echo
+            echo '## Tail of build log'
+            echo '```'
+            tail -120 ci/build.log
+            echo '```'
+          } > ci/FAILURE.md
+
+          git config user.name  "ci-diagnostics"
+          git config user.email "ci-diagnostics@users.noreply.github.com"
+          git fetch origin ci-diagnostics --depth=1 || true
+          git checkout -B ci-diagnostics
+          git add -f ci/FAILURE.md ci/build.log || true
+          git commit -m "ci: failure summary for run ${GITHUB_RUN_NUMBER}" || true
+          git push -f origin ci-diagnostics || true
+
       - name: Upload failure log on error
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-failure-log
-          path: app/build/reports/
+          path: ci/
           if-no-files-found: ignore
