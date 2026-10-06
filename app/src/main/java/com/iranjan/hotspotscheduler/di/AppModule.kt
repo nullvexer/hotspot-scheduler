@@ -29,6 +29,7 @@ import com.iranjan.hotspotscheduler.automation.verification.VerificationEngine
 import com.iranjan.hotspotscheduler.automation.verification.VerificationEngineImpl
 import com.iranjan.hotspotscheduler.automation.recovery.ReconciliationEngine
 import com.iranjan.hotspotscheduler.automation.recovery.ReconciliationEngineImpl
+import com.iranjan.hotspotscheduler.automation.recovery.CrashRecovery
 import com.iranjan.hotspotscheduler.platform.alarm.AlarmScheduler
 import com.iranjan.hotspotscheduler.platform.screen.ScreenSession
 import com.iranjan.hotspotscheduler.platform.screen.ScreenSessionImpl
@@ -226,9 +227,15 @@ object AutomationModule {
     fun provideVerificationEngine(strategyResolver: OperationStrategyResolver): VerificationEngine =
         VerificationEngineImpl(strategyResolver)
 
+    @Binds
+    abstract fun bindReconciliationEngine(impl: ReconciliationEngineImpl): ReconciliationEngine
+
     @Provides
     @Singleton
-    fun provideReconciliationEngine(): ReconciliationEngine = ReconciliationEngineImpl()
+    fun provideCrashRecovery(
+        reconciliationEngine: ReconciliationEngineImpl,
+        logger: AutomationLogger
+    ): CrashRecovery = CrashRecovery(reconciliationEngine, logger)
 
     @Provides
     @Singleton
