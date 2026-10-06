@@ -1,6 +1,7 @@
 package com.iranjan.hotspotscheduler.automation.transaction
 
 import com.iranjan.hotspotscheduler.automation.session.AutomationSession
+import com.iranjan.hotspotscheduler.automation.session.EmergencyStop
 import com.iranjan.hotspotscheduler.automation.verification.VerificationEngine
 import com.iranjan.hotspotscheduler.automation.strategies.OperationStrategyResolver
 import com.iranjan.hotspotscheduler.domain.model.AutomationResult
@@ -21,11 +22,14 @@ class TransactionExecutorImpl @Inject constructor(
     private val keyguardEngine: KeyguardEngine,
     private val strategyResolver: OperationStrategyResolver,
     private val verificationEngine: VerificationEngine,
-    private val logger: AutomationLogger
+    private val logger: AutomationLogger,
+    private val emergencyStop: EmergencyStop
 ) : TransactionExecutor {
 
     override suspend fun execute(session: AutomationSession): AutomationResult {
         logger.logTransition(session, AutomationSession.State.PREPARING)
+
+        emergencyStop.checkAndThrow()
 
         // 1. Wake
         session.transitionTo(AutomationSession.State.WAKE_REQUESTED)
@@ -38,6 +42,8 @@ class TransactionExecutorImpl @Inject constructor(
         }
         session.transitionTo(AutomationSession.State.SCREEN_AWAKE)
 
+        emergencyStop.checkAndThrow()
+
         // 2. Unlock (one planned attempt)
         session.transitionTo(AutomationSession.State.KEYGUARD_CHECK)
         val unlockResult = screenSession.ensureUnlocked()
@@ -49,11 +55,15 @@ class TransactionExecutorImpl @Inject constructor(
         }
         session.transitionTo(AutomationSession.State.AUTOMATION_READY)
 
+        emergencyStop.checkAndThrow()
+
         // 3. Network steps (ordered by OperationOrder)
         val steps = OperationOrder.plan(session.desiredState.hotspot, session.desiredState.mobileData)
         val stepResults = mutableListOf<StepResult>()
 
         for (feature in steps) {
+            emergencyStop.checkAndThrow()
+
             session.transitionTo(stepState(feature))
             val target = session.desiredState.targetFor(feature)
             val targetOn = (target as? com.iranjan.hotspotscheduler.domain.model.Target.Set)?.on ?: false
@@ -96,6 +106,8 @@ class TransactionExecutorImpl @Inject constructor(
             delay(100)
         }
 
+        emergencyStop.checkAndThrow()
+
         // 4. Final verification
         session.transitionTo(AutomationSession.State.FINAL_STATE_VERIFICATION)
         val verified = verificationEngine.verifyAll(session.desiredState)
@@ -106,6 +118,8 @@ class TransactionExecutorImpl @Inject constructor(
                 session.sessionId
             )
         }
+
+        emergencyStop.checkAndThrow()
 
         // 5. Lock exactly once
         session.transitionTo(AutomationSession.State.LOCK_REQUESTED)

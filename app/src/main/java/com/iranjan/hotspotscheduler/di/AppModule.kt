@@ -23,6 +23,7 @@ import com.iranjan.hotspotscheduler.domain.scheduler.OperationOrder
 import com.iranjan.hotspotscheduler.automation.session.AutomationCoordinator
 import com.iranjan.hotspotscheduler.automation.session.DefaultSessionQueue
 import com.iranjan.hotspotscheduler.automation.session.SessionQueue
+import com.iranjan.hotspotscheduler.automation.session.EmergencyStop
 import com.iranjan.hotspotscheduler.automation.transaction.TransactionExecutor
 import com.iranjan.hotspotscheduler.automation.transaction.TransactionExecutorImpl
 import com.iranjan.hotspotscheduler.automation.verification.VerificationEngine
@@ -233,8 +234,9 @@ object AutomationModule {
         keyguardEngine: KeyguardEngine,
         strategyResolver: OperationStrategyResolver,
         verificationEngine: VerificationEngine,
-        logger: AutomationLogger
-    ): TransactionExecutor = TransactionExecutorImpl(screenSession, keyguardEngine, strategyResolver, verificationEngine, logger)
+        logger: AutomationLogger,
+        emergencyStop: EmergencyStop
+    ): TransactionExecutor = TransactionExecutorImpl(screenSession, keyguardEngine, strategyResolver, verificationEngine, logger, emergencyStop)
 
     @Provides
     @Singleton
@@ -254,6 +256,10 @@ object AutomationModule {
     @Provides
     @Singleton
     fun provideAutomationLogger(): AutomationLogger = AutomationLoggerImpl()
+
+    @Provides
+    @Singleton
+    fun provideEmergencyStop(logger: AutomationLogger): EmergencyStop = EmergencyStop(logger)
 
     @Provides
     @Singleton
