@@ -3,4 +3,8 @@
     <string name="acc_service_label">Hotspot Scheduler Automation</string>
     <string name="acc_service_desc">Automates Wi-Fi hotspot and mobile data scheduling via accessibility</string>
     <string name="acc_service_summary">Controls Settings UI to toggle hotspot and mobile data on schedule</string>
+    <string name="nav_dashboard">Dashboard</string>
+    <string name="nav_routines">Routines</string>
+    <string name="nav_diagnostics">Diagnostics</string>
+    <string name="nav_setup">Setup</string>
 </resources>
