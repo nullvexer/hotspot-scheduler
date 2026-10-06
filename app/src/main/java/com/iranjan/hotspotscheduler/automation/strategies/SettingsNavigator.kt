@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.automation.strategies
 
+
+import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -14,7 +16,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class SettingsNavigator @Inject constructor(@androidx.hilt.android.qualifiers.ApplicationContext private val context: Context) {
+class SettingsNavigator @Inject constructor(@ApplicationContext private val context: Context) {
 
     private val hotspotCandidates = listOf(
         ComponentName("com.android.settings", "com.samsung.android.settings.wifi.mobileap.WifiApSettings"),

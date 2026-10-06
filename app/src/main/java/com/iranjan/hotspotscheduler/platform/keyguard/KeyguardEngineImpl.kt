@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.platform.keyguard
 
+
+import dagger.hilt.android.qualifiers.ApplicationContext
 import android.app.KeyguardManager
 import android.content.Context
 import android.os.Build
@@ -14,7 +16,7 @@ import javax.inject.Singleton
 
 @Singleton
 class KeyguardEngineImpl @Inject constructor(
-    @androidx.hilt.android.qualifiers.ApplicationContext private val context: Context,
+    @ApplicationContext private val context: Context,
     private val accessibility: AccessibilityRuntime,
     private val pinPadResolver: PinPadResolver,
     private val credentialVault: CredentialVault

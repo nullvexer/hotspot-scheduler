@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.platform.screen
 
+
+import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
 import android.os.PowerManager
 import android.util.Log
@@ -11,7 +13,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class WakeEngine @Inject constructor(@androidx.hilt.android.qualifiers.ApplicationContext private val context: Context) {
+class WakeEngine @Inject constructor(@ApplicationContext private val context: Context) {
 
     private val powerManager: PowerManager? = context.getSystemService(PowerManager::class.java)
 

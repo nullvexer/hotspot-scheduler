@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.data.encrypted
 
+
+import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -17,7 +19,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class CredentialVaultImpl @Inject constructor(@androidx.hilt.android.qualifiers.ApplicationContext private val context: Context) : CredentialVault {
+class CredentialVaultImpl @Inject constructor(@ApplicationContext private val context: Context) : CredentialVault {
 
     private val store: DataStore<Preferences> by lazy {
         val deContext = context.createDeviceProtectedStorageContext()

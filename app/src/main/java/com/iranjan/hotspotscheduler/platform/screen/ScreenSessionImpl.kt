@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.platform.screen
 
+
+import dagger.hilt.android.qualifiers.ApplicationContext
 import android.accessibilityservice.AccessibilityService
 import android.app.KeyguardManager
 import android.content.Context
@@ -16,7 +18,7 @@ import javax.inject.Singleton
 
 @Singleton
 class ScreenSessionImpl @Inject constructor(
-    @androidx.hilt.android.qualifiers.ApplicationContext private val context: Context,
+    @ApplicationContext private val context: Context,
     private val wakeEngine: WakeEngine,
     private val keyguardEngine: KeyguardEngine,
     private val credentialVault: CredentialVault

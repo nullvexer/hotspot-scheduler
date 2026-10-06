@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.platform.permissions
 
+
+import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -18,7 +20,7 @@ import javax.inject.Singleton
 
 @Singleton
 class CapabilityProbe @Inject constructor(
-    @androidx.hilt.android.qualifiers.ApplicationContext private val context: Context,
+    @ApplicationContext private val context: Context,
     private val accessibility: AccessibilityRuntime,
     private val wakeEngine: WakeEngine,
     private val keyguardEngine: KeyguardEngine,
