@@ -40,11 +40,6 @@
         </activity>
 
         <activity
-            android:name=".ui.setup.SetupActivity"
-            android:exported="true"
-            android:theme="@style/Theme.HotspotScheduler" />
-
-        <activity
             android:name=".accessibility.ToggleHostActivity"
             android:excludeFromRecents="true"
             android:exported="false"

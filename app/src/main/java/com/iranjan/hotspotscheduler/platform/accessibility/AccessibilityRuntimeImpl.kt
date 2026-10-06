@@ -110,7 +110,7 @@ class AccessibilityRuntimeImpl @Inject constructor() : AccessibilityRuntime {
     }
 
     internal class ServiceWrapper(private val service: android.accessibilityservice.AccessibilityService) {
-        fun rootInActiveWindow: AccessibilityNodeInfo? = service.rootInActiveWindow
+fun rootInActiveWindow(): AccessibilityNodeInfo? = service.rootInActiveWindow
         fun getWindows(): List<android.view.accessibility.AccessibilityWindowInfo> = service.windows ?: emptyList()
         fun dispatchGesture(desc: android.accessibilityservice.GestureDescription): Boolean =
             service.dispatchGesture(desc, null, null)

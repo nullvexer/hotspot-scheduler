@@ -111,7 +111,7 @@ object DataStoreModule {
 
 @Module
 @InstallIn(SingletonComponent::class)
-object RepositoryModule {
+abstract class RepositoryModule {
 
     @Binds
     abstract fun bindRoutineRepository(impl: RoutineRepositoryImpl): RoutineRepository
@@ -144,15 +144,7 @@ object DomainModule {
 
 @Module
 @InstallIn(SingletonComponent::class)
-object PlatformModule {
-
-    @Provides
-    @Singleton
-    fun provideWakeEngine(@ApplicationContext context: Context): WakeEngine = WakeEngine(context)
-
-    @Provides
-    @Singleton
-    fun providePinPadResolver(accessibility: AccessibilityRuntime): PinPadResolver = PinPadResolver(accessibility)
+abstract class PlatformBindingsModule {
 
     @Binds
     abstract fun bindScreenSession(impl: ScreenSessionImpl): ScreenSession
@@ -168,6 +160,22 @@ object PlatformModule {
 
     @Binds
     abstract fun bindNavigationStrategy(impl: SamsungSettingsNavigationStrategy): NavigationStrategy
+
+    @Binds
+    abstract fun bindReconciliationEngine(impl: ReconciliationEngineImpl): ReconciliationEngine
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object PlatformModule {
+
+    @Provides
+    @Singleton
+    fun provideWakeEngine(@ApplicationContext context: Context): WakeEngine = WakeEngine(context)
+
+    @Provides
+    @Singleton
+    fun providePinPadResolver(accessibility: AccessibilityRuntime): PinPadResolver = PinPadResolver(accessibility)
 
     @Provides
     @Singleton
@@ -242,9 +250,6 @@ object AutomationModule {
     @Singleton
     fun provideVerificationEngine(strategyResolver: OperationStrategyResolver): VerificationEngine =
         VerificationEngineImpl(strategyResolver)
-
-    @Binds
-    abstract fun bindReconciliationEngine(impl: ReconciliationEngineImpl): ReconciliationEngine
 
     @Provides
     @Singleton
