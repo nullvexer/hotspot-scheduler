@@ -50,6 +50,8 @@ import com.iranjan.hotspotscheduler.automation.strategies.SamsungQuickSettingsDa
 import com.iranjan.hotspotscheduler.automation.strategies.QuickSettingsNavigator
 import com.iranjan.hotspotscheduler.automation.strategies.NetworkOperationStrategy
 import com.iranjan.hotspotscheduler.platform.screen.WakeEngine
+import com.iranjan.hotspotscheduler.platform.permissions.CapabilityProbe
+import com.iranjan.hotspotscheduler.automation.diagnostics.AutomationDiagnostics
 import com.iranjan.hotspotscheduler.automation.logger.AutomationLogger
 import com.iranjan.hotspotscheduler.automation.logger.AutomationLoggerImpl
 import dagger.Binds
@@ -174,6 +176,18 @@ object PlatformModule {
     @Singleton
     fun provideSwitchFinder(accessibility: AccessibilityRuntime, prefs: AutomationPreferences): SwitchFinder =
         SwitchFinder(accessibility, prefs)
+
+    @Provides
+    @Singleton
+    fun provideCapabilityProbe(
+        context: Context,
+        accessibility: AccessibilityRuntime,
+        wakeEngine: WakeEngine,
+        keyguardEngine: KeyguardEngine,
+        strategyResolver: OperationStrategyResolver,
+        prefs: AutomationPreferences,
+        credentialVault: CredentialVault
+    ): CapabilityProbe = CapabilityProbe(context, accessibility, wakeEngine, keyguardEngine, strategyResolver, prefs, credentialVault)
 }
 
 @Module
@@ -240,6 +254,18 @@ object AutomationModule {
     @Provides
     @Singleton
     fun provideAutomationLogger(): AutomationLogger = AutomationLoggerImpl()
+
+    @Provides
+    @Singleton
+    fun provideAutomationDiagnostics(
+        capabilityProbe: CapabilityProbe,
+        crashRecovery: CrashRecovery,
+        logger: AutomationLogger,
+        accessibility: AccessibilityRuntime,
+        screenSession: ScreenSession,
+        keyguardEngine: KeyguardEngine,
+        strategyResolver: OperationStrategyResolver
+    ): AutomationDiagnostics = AutomationDiagnostics(capabilityProbe, crashRecovery, logger, accessibility, screenSession, keyguardEngine, strategyResolver)
 
     @Provides
     @Singleton
