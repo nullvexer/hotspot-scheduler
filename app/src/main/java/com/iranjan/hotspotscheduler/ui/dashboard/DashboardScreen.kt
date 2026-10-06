@@ -1,5 +1,10 @@
 package com.iranjan.hotspotscheduler.ui.dashboard
 
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
+import androidx.compose.foundation.layout.background
+import androidx.compose.foundation.layout.weight
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box

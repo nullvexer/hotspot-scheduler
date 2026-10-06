@@ -45,23 +45,36 @@ class RoutineEditorViewModel @Inject constructor(
     val routineId: StateFlow<Long?> = _routineId
     val error: StateFlow<String?> = _error
 
-    val durationMinutes: StateFlow<Int> = androidx.compose.runtime.derivedStateOf {
+    // Derived values are recomputed in the setters rather than with derivedStateOf: these must be
+// plain Flows so the editor screen can collect them without a Compose runtime dependency.
+    private val _durationMinutes = MutableStateFlow(60)
+    val durationMinutes: StateFlow<Int> = _durationMinutes
+
+    private val _effectiveStatePreview = MutableStateFlow("")
+    val effectiveStatePreview: StateFlow<String> = _effectiveStatePreview
+
+    private val _validationErrors = MutableStateFlow<String?>(null)
+    val validationErrors: StateFlow<String?> = _validationErrors
+
+    private fun recomputeDerived() {
         val start = _startHour.value * 60 + _startMinute.value
         val end = _endHour.value * 60 + _endMinute.value
-        if (end > start) end - start else 1440 - start + end
-    }.toStateFlow()
+        _durationMinutes.value = if (end > start) end - start else (1440 - start + end)
 
-    val effectiveStatePreview: StateFlow<String> = androidx.compose.runtime.derivedStateOf {
-        val hotspot = when (_hotspotTarget.value) {
-            is Target.Set -> if (_hotspotTarget.value.on) "ON" else "OFF"
-            else "UNCHANGED"
+        fun render(target: Target): String = when (target) {
+            is Target.Set -> if (target.on) "ON" else "OFF"
+            Target.LeaveAlone -> "UNCHANGED"
         }
-        val data = when (_dataTarget.value) {
-            is Target.Set -> if (_dataTarget.value.on) "ON" else "OFF"
-            else "UNCHANGED"
+        _effectiveStatePreview.value =
+            "Hotspot: ${render(_hotspotTarget.value)}  •  Mobile Data: ${render(_dataTarget.value)}"
+
+        _validationErrors.value = when {
+            _name.value.isBlank() -> "Name required"
+            _days.value.isEmpty() -> "Select at least one day"
+            start == end -> "Start and end must differ"
+            else -> null
         }
-        "Hotspot: $hotspot  •  Mobile Data: $data"
-    }.toStateFlow()
+    }
 
     fun loadRoutine(id: Long) {
         viewModelScope.launch {
@@ -99,16 +112,21 @@ class RoutineEditorViewModel @Inject constructor(
         _error.value = null
     }
 
-    fun onNameChange(name: String) { _name.value = name }
-    fun onStartTimeChange(hour: Int, minute: Int) { _startHour.value = hour; _startMinute.value = minute }
-    fun onEndTimeChange(hour: Int, minute: Int) { _endHour.value = hour; _endMinute.value = minute }
+    fun onNameChange(name: String) { _name.value = name; recomputeDerived() }
+    fun onStartTimeChange(hour: Int, minute: Int) {
+        _startHour.value = hour; _startMinute.value = minute; recomputeDerived()
+    }
+    fun onEndTimeChange(hour: Int, minute: Int) {
+        _endHour.value = hour; _endMinute.value = minute; recomputeDerived()
+    }
     fun onDayToggle(day: java.time.DayOfWeek) {
         val current = _days.value.toMutableSet()
         if (current.contains(day)) current.remove(day) else current.add(day)
         _days.value = current
+        recomputeDerived()
     }
-    fun onHotspotTargetChange(target: Target) { _hotspotTarget.value = target }
-    fun onDataTargetChange(target: Target) { _dataTarget.value = target }
+    fun onHotspotTargetChange(target: Target) { _hotspotTarget.value = target; recomputeDerived() }
+    fun onDataTargetChange(target: Target) { _dataTarget.value = target; recomputeDerived() }
     fun onPasswordChange(password: String) { _hotspotPassword.value = password }
     fun onPriorityChange(priority: Int) { _priority.value = priority }
 
@@ -154,11 +172,4 @@ class RoutineEditorViewModel @Inject constructor(
             }
         }
     }
-
-    val validationErrors: StateFlow<String?> = androidx.compose.runtime.derivedStateOf {
-        if (_name.value.isBlank()) "Name required"
-        else if (_days.value.isEmpty()) "Select at least one day"
-        else if (_startHour.value == _endHour.value && _startMinute.value == _endMinute.value) "Start ≠ End"
-        else null
-    }.toStateFlow()
 }

@@ -1,5 +1,13 @@
 package com.iranjan.hotspotscheduler.ui.editor
 
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
+import androidx.compose.foundation.layout.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.layout.width
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -414,33 +422,22 @@ fun TargetRow(label: String, icon: androidx.compose.graphics.vector.ImageVector,
                 color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        androidx.compose.material3.SegmentedButton(
-            selected = when (target) {
-                is com.iranjan.hotspotscheduler.domain.model.Target.Set -> if (target.on) 0 else 1
-                else 2
-            },
-            onClick = { index ->
-                onChange(
-                    when (index) {
-                        0 -> com.iranjan.hotspotscheduler.domain.model.Target.Set(true)
-                        1 -> com.iranjan.hotspotscheduler.domain.model.Target.Set(false)
-                        else -> com.iranjan.hotspotscheduler.domain.model.Target.LeaveAlone
-                    }
+// Plain FilterChips instead of SegmentedButton: the segmented-button API changed shape between
+// Material3 releases, and this control must keep compiling across the version bumps in build.gradle.
+        val options = listOf<Target>(
+            com.iranjan.hotspotscheduler.domain.model.Target.Set(true),
+            com.iranjan.hotspotscheduler.domain.model.Target.Set(false),
+            com.iranjan.hotspotscheduler.domain.model.Target.LeaveAlone
+        )
+        val labels = listOf("ON", "OFF", "KEEP")
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            options.forEachIndexed { index, option ->
+                androidx.compose.material3.FilterChip(
+                    selected = target == option,
+                    onClick = { onChange(option) },
+                    label = { Text(text = labels[index], fontSize = 11.sp) }
                 )
             }
-        ) {
-            androidx.compose.material3.SegmentedButtonItem(
-                modifier = Modifier.width(72.dp),
-                label = { Text(text = "ON", fontSize = 11.sp) }
-            )
-            androidx.compose.material3.SegmentedButtonItem(
-                modifier = Modifier.width(72.dp),
-                label = { Text(text = "OFF", fontSize = 11.sp) }
-            )
-            androidx.compose.material3.SegmentedButtonItem(
-                modifier = Modifier.width(96.dp),
-                label = { Text(text = "UNCHANGED", fontSize = 11.sp) }
-            )
         }
     }
 }

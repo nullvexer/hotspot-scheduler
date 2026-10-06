@@ -1,5 +1,13 @@
 package com.iranjan.hotspotscheduler.ui.components
 
+import androidx.compose.foundation.layout.background
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -332,16 +340,12 @@ fun NextBoundaryCard(
                         color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
                     )
                 }
-                androidx.compose.material.icons.Icons.Filled.Schedule
-                    .toImageVector()
-                    ?.let { icon ->
-                        androidx.compose.material3.Icon(
-                            imageVector = icon,
-                            contentDescription = null,
-                            tint = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(48.dp)
-                        )
-                    }
+                androidx.compose.material3.Icon(
+                    imageVector = androidx.compose.material.icons.Icons.Filled.Schedule,
+                    contentDescription = null,
+                    tint = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(48.dp)
+                )
             }
         }
     }

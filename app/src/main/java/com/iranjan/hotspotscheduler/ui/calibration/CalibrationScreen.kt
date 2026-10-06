@@ -1,5 +1,15 @@
 package com.iranjan.hotspotscheduler.ui.calibration
 
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
+import androidx.compose.foundation.layout.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.LazyColumn
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyColumn
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
