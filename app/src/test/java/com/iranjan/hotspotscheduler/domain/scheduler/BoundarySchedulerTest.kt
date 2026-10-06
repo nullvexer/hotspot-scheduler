@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.domain.scheduler
 
+import kotlinx.coroutines.runBlocking
+
 import com.iranjan.hotspotscheduler.domain.model.Routine
 import com.iranjan.hotspotscheduler.domain.model.Target
 import com.iranjan.hotspotscheduler.data.repository.RoutineRepository
@@ -31,7 +33,7 @@ class BoundarySchedulerTest {
     }
 
     @Test
-    fun `rescheduleAll calls alarm scheduler with routines and master flag`() = runBlockingTest {
+    fun `rescheduleAll calls alarm scheduler with routines and master flag`() = runBlocking {
         val routine = Routine(
             id = 1, name = "Test", enabled = true,
             daysOfWeek = java.time.DayOfWeek.values().toSet(),
@@ -49,7 +51,7 @@ class BoundarySchedulerTest {
     }
 
     @Test
-    fun `rescheduleAll passes masterDisabled false to alarm`() = runBlockingTest {
+    fun `rescheduleAll passes masterDisabled false to alarm`() = runBlocking {
         `when`(mockPrefs.masterEnabled.first()).thenReturn(false)
         `when`(mockRepo.getEnabledRoutines()).thenReturn(emptyList())
 
@@ -58,7 +60,3 @@ class BoundarySchedulerTest {
         verify(mockAlarm).rescheduleAll(emptyList(), false)
     }
 }
-
-import kotlinx.coroutines.runBlocking
-
-fun runBlockingTest(block: suspend () -> Unit) = runBlocking { block() }

@@ -1,5 +1,7 @@
 package com.iranjan.hotspotscheduler.domain.scheduler
 
+import kotlinx.coroutines.runBlocking
+
 import com.iranjan.hotspotscheduler.domain.model.DesiredNetworkState
 import com.iranjan.hotspotscheduler.domain.model.Routine
 import com.iranjan.hotspotscheduler.domain.model.Target
@@ -26,7 +28,7 @@ class DesiredStateResolverTest {
     }
 
     @Test
-    fun `masterDisabled returns untouched`() = runBlockingTest {
+    fun `masterDisabled returns untouched`() = runBlocking {
         val inputs = DesiredStateResolver.Inputs(
             now = Instant.now(),
             zone = ZoneId.systemDefault(),
@@ -40,7 +42,7 @@ class DesiredStateResolverTest {
     }
 
     @Test
-    fun `paused returns untouched`() = runBlockingTest {
+    fun `paused returns untouched`() = runBlocking {
         val inputs = DesiredStateResolver.Inputs(
             now = Instant.now(),
             zone = ZoneId.systemDefault(),
@@ -54,7 +56,7 @@ class DesiredStateResolverTest {
     }
 
     @Test
-    fun `noActiveRoutines returns allOff`() = runBlockingTest {
+    fun `noActiveRoutines returns allOff`() = runBlocking {
         `when`(mockRepo.getEnabledRoutines()).thenReturn(emptyList())
         val inputs = DesiredStateResolver.Inputs(
             now = Instant.now(),
@@ -69,7 +71,7 @@ class DesiredStateResolverTest {
     }
 
     @Test
-    fun `activeRoutineWithDataAndHotspot returns bothOn`() = runBlockingTest {
+    fun `activeRoutineWithDataAndHotspot returns bothOn`() = runBlocking {
         val now = Instant.now()
         val routine = Routine(
             id = 1, name = "Test", enabled = true,
@@ -87,7 +89,7 @@ class DesiredStateResolverTest {
     }
 
     @Test
-    fun `capReached forces hotspotOff`() = runBlockingTest {
+    fun `capReached forces hotspotOff`() = runBlocking {
         val now = Instant.now()
         val routine = Routine(
             id = 1, name = "Test", enabled = true,
@@ -105,7 +107,7 @@ class DesiredStateResolverTest {
     }
 
     @Test
-    fun `suppressed forces hotspotOff`() = runBlockingTest {
+    fun `suppressed forces hotspotOff`() = runBlocking {
         val now = Instant.now()
         val routine = Routine(
             id = 1, name = "Test", enabled = true,
@@ -123,6 +125,3 @@ class DesiredStateResolverTest {
 }
 
 // Simple runBlockingTest for JUnit 4
-import kotlinx.coroutines.runBlocking
-
-fun runBlockingTest(block: suspend () -> Unit) = runBlocking { block() }
