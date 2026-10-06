@@ -2,7 +2,7 @@ package com.iranjan.hotspotscheduler.automation.strategies
 
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
-import com.iranjan.hotspotscheduler.data.model.CalibrationSignature
+import com.iranjan.hotspotscheduler.data.datastore.CalibrationSignature
 import com.iranjan.hotspotscheduler.platform.Result
 import com.iranjan.hotspotscheduler.platform.accessibility.AccessibilityRuntime
 import com.iranjan.hotspotscheduler.platform.accessibility.NodeSelector

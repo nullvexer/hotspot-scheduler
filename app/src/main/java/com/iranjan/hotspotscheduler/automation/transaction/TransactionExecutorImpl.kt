@@ -12,6 +12,7 @@ import com.iranjan.hotspotscheduler.platform.screen.ScreenSession
 import com.iranjan.hotspotscheduler.automation.logger.AutomationLogger
 import com.iranjan.hotspotscheduler.domain.scheduler.OperationOrder
 import com.iranjan.hotspotscheduler.platform.Result
+import com.iranjan.hotspotscheduler.util.AttemptLog
 import kotlinx.coroutines.delay
 import javax.inject.Inject
 import javax.inject.Singleton

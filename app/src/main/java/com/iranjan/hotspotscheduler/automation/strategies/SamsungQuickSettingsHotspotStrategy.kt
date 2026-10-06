@@ -15,6 +15,7 @@ class SamsungQuickSettingsHotspotStrategy @Inject constructor(
     private val qsNavigator: QuickSettingsNavigator
 ) : NetworkOperationStrategy {
 
+    override val name: String = "Quick Settings > Hotspot tile"
     override suspend fun readState(): Result<Boolean> {
         val openResult = qsNavigator.openQuickSettings()
         if (openResult is Result.Failure) return openResult

@@ -231,9 +231,8 @@ object AutomationModule {
     fun provideOperationStrategyResolver(
         hotspotStrategies: List<NetworkOperationStrategy>,
         dataStrategies: List<NetworkOperationStrategy>,
-        accessibility: AccessibilityRuntime,
-        screenSession: ScreenSession
-    ): OperationStrategyResolver = OperationStrategyResolver(hotspotStrategies, dataStrategies, accessibility, screenSession)
+        accessibility: AccessibilityRuntime
+    ): OperationStrategyResolver = OperationStrategyResolver(hotspotStrategies, dataStrategies, accessibility)
 
     @Provides
     @Singleton

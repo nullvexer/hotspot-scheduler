@@ -15,6 +15,7 @@ class SamsungQuickSettingsDataStrategy @Inject constructor(
     private val qsNavigator: QuickSettingsNavigator
 ) : NetworkOperationStrategy {
 
+    override val name: String = "Quick Settings > Mobile data tile"
     override suspend fun readState(): Result<Boolean> {
         val openResult = qsNavigator.openQuickSettings()
         if (openResult is Result.Failure) return openResult

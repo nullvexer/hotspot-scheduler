@@ -3,7 +3,7 @@ package com.iranjan.hotspotscheduler.platform.accessibility
 import android.graphics.Path
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
-import com.iranjan.hotspotscheduler.platform.screen.Result
+import com.iranjan.hotspotscheduler.platform.Result
 import kotlinx.coroutines.flow.StateFlow
 
 interface AccessibilityRuntime {

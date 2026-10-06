@@ -1,16 +1,20 @@
-package com.iranjan.hotspotscheduler.domain.automation
+package com.iranjan.hotspotscheduler.automation.session
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
+import com.iranjan.hotspotscheduler.domain.automation.TimeoutPolicy
+import com.iranjan.hotspotscheduler.domain.model.ActualNetworkState
+import com.iranjan.hotspotscheduler.domain.model.DesiredNetworkState
+import com.iranjan.hotspotscheduler.domain.model.FailureReason
+import com.iranjan.hotspotscheduler.domain.model.Feature
+import com.iranjan.hotspotscheduler.domain.model.StepResult
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class AutomationSession(
     val sessionId: String,
     val trigger: Trigger,
-    val desiredState: com.iranjan.hotspotscheduler.domain.model.DesiredNetworkState,
-    val initialState: com.iranjan.hotspotscheduler.domain.model.ActualNetworkState,
+    val desiredState: DesiredNetworkState,
+    val initialState: ActualNetworkState,
     val hotspotPassword: String? = null,
     val timeoutPolicy: TimeoutPolicy = TimeoutPolicy.default
 ) {
@@ -50,8 +54,8 @@ data class AutomationSession(
     var currentState: State = State.IDLE
         private set
 
-    val perStepResults = mutableMapOf<com.iranjan.hotspotscheduler.domain.model.Feature, com.iranjan.hotspotscheduler.domain.model.StepResult>()
-    var failureReason: com.iranjan.hotspotscheduler.domain.model.FailureReason? = null
+    val perStepResults = mutableMapOf<Feature, StepResult>()
+    var failureReason: FailureReason? = null
     private val startedAt = System.currentTimeMillis()
 
     fun transitionTo(newState: State) {

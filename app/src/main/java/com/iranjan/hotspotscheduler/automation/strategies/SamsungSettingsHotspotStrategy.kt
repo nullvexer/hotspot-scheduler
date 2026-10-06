@@ -20,6 +20,7 @@ class SamsungSettingsHotspotStrategy @Inject constructor(
     private val screenSession: com.iranjan.hotspotscheduler.platform.screen.ScreenSession
 ) : NetworkOperationStrategy {
 
+    override val name: String = "Samsung Settings > Mobile Hotspot"
     override suspend fun readState(): Result<Boolean> {
         val matchResult = switchFinder.findHotspotToggle()
         if (matchResult is Result.Failure) return Result.failure(matchResult.error)

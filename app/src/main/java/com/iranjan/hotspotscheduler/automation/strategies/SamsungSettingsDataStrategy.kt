@@ -21,6 +21,7 @@ class SamsungSettingsDataStrategy @Inject constructor(
     private val screenSession: ScreenSession
 ) : NetworkOperationStrategy {
 
+    override val name: String = "Samsung Settings > Mobile data"
     override suspend fun readState(): Result<Boolean> {
         val matchResult = switchFinder.findMobileDataToggle()
         if (matchResult is Result.Failure) return Result.failure(matchResult.error)
