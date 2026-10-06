@@ -27,6 +27,7 @@ import com.iranjan.hotspotscheduler.ui.diagnostics.DiagnosticsScreen
 import com.iranjan.hotspotscheduler.ui.routines.RoutinesScreen
 import com.iranjan.hotspotscheduler.ui.setup.SetupScreen
 import com.iranjan.hotspotscheduler.ui.editor.RoutineEditorScreen
+import com.iranjan.hotspotscheduler.ui.calibration.CalibrationScreen
 
 private data class BottomItem(val route: String, val icon: ImageVector, val labelRes: Int)
 
@@ -90,8 +91,11 @@ fun AppNav() {
             composable("setup") {
                 SetupScreen(
                     onNavigateBack = { navController.popBackStack() },
-                    onNavigateToCalibration = { /* TODO: calibration screen */ }
+                    onNavigateToCalibration = { navController.navigate("calibration") }
                 )
+            }
+            composable("calibration") {
+                CalibrationScreen(onDone = { navController.popBackStack() })
             }
             composable(
                 route = "editor/{routineId}",
