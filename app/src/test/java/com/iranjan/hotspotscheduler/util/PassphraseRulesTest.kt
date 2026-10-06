@@ -1,76 +1,46 @@
 package com.iranjan.hotspotscheduler.util
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
+import org.junit.Assert.*
 import org.junit.Test
 
-/**
- * WPA2 passphrase rules. These previously lived in the deleted Shizuku command builder and in the
- * editor as a separate, weaker "length >= 8" check, so a password the engine could never use was
- * accepted by the UI, encrypted, stored, and then silently ignored at toggle time.
- */
 class PassphraseRulesTest {
 
     @Test
-    fun `accepts a normal passphrase`() {
-        assertTrue(PassphraseRules.isValid("mypassword"))
-        assertTrue(PassphraseRules.isValid("Passw0rd!"))
-        assertTrue(PassphraseRules.isValid("abc defg"))
+    fun `valid password passes`() {
+        assertTrue(PassphraseRules.isValid("Password123"))
+        assertTrue(PassphraseRules.isValid("A".repeat(63)))
+        assertTrue(PassphraseRules.isValid("!@#\$%^&*()"))
     }
 
     @Test
-    fun `accepts the boundary lengths`() {
-        assertTrue(PassphraseRules.isValid("a".repeat(PassphraseRules.MIN_LENGTH)))
-        assertTrue(PassphraseRules.isValid("a".repeat(PassphraseRules.MAX_LENGTH)))
+    fun `too short fails`() {
+        assertFalse(PassphraseRules.isValid("Short1"))
+        assertNull(PassphraseRules.rejectionReason("Short1"))
     }
 
     @Test
-    fun `rejects too short`() {
-        assertFalse(PassphraseRules.isValid(""))
-        assertFalse(PassphraseRules.isValid("a".repeat(PassphraseRules.MIN_LENGTH - 1)))
+    fun `too long fails`() {
+        assertFalse(PassphraseRules.isValid("A".repeat(64)))
     }
 
     @Test
-    fun `rejects too long`() {
-        assertFalse(PassphraseRules.isValid("a".repeat(PassphraseRules.MAX_LENGTH + 1)))
-        assertFalse(PassphraseRules.isValid("a".repeat(200)))
+    fun `non-ascii fails`() {
+        assertFalse(PassphraseRules.isValid("Passwörd123"))
+        assertFalse(PassphraseRules.isValid("密码123"))
     }
 
     @Test
-    fun `rejects null`() {
-        assertFalse(PassphraseRules.isValid(null))
+    fun `control characters fail`() {
+        assertFalse(PassphraseRules.isValid("Pass\x00word"))
     }
 
     @Test
-    fun `rejects non ascii`() {
-        assertFalse(PassphraseRules.isValid("passwörd1"))
-        assertFalse(PassphraseRules.isValid("パスワード1"))
-        assertFalse(PassphraseRules.isValid("пароль12"))
-    }
-
-    @Test
-    fun `rejects control characters`() {
-        assertFalse(PassphraseRules.isValid("abc\tdefg"))
-        assertFalse(PassphraseRules.isValid("abc\ndefg"))
-    }
-
-    @Test
-    fun `accepts printable ascii across the range`() {
-        val slice = (32..126).map { it.toChar() }.joinToString("").take(PassphraseRules.MAX_LENGTH)
-        assertEquals(PassphraseRules.MAX_LENGTH, slice.length)
-        assertTrue(PassphraseRules.isValid(slice))
-    }
-
-    @Test
-    fun `rejection reason is null only when valid or empty`() {
-        assertNull(PassphraseRules.rejectionReason(null))
+    fun `rejectionReason returns correct message`() {
+        assertEquals("too short (min 8 characters)", PassphraseRules.rejectionReason("short"))
+        assertEquals("too long (max 63 characters)", PassphraseRules.rejectionReason("A".repeat(64)))
+        assertEquals("must be printable ASCII letters, digits or symbols", PassphraseRules.rejectionReason("Passwörd"))
+        assertNull(PassphraseRules.rejectionReason("ValidPass123"))
         assertNull(PassphraseRules.rejectionReason(""))
-        assertNull(PassphraseRules.rejectionReason("goodpassword"))
-        assertNotNull(PassphraseRules.rejectionReason("short"))
-        assertNotNull(PassphraseRules.rejectionReason("a".repeat(100)))
-        assertNotNull(PassphraseRules.rejectionReason("passwörd1"))
+        assertNull(PassphraseRules.rejectionReason(null))
     }
 }

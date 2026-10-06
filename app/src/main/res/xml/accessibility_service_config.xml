@@ -1,22 +1,9 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
-  NO android:packageNames filter.
-
-  This is essential for unattended unlock. The previous config restricted events to
-  com.android.settings and com.samsung.android.settings, so the service never received anything
-  from the keyguard / SystemUI process and could not see the PIN keypad at all.
-
-  To bound the cost of an unfiltered service, HotspotAccessibilityService allowlists the packages
-  it cares about in code and ignores every other window.
-
-  canPerformGestures: required for dispatchGesture(), used to swipe the lock screen up to reveal
-  the PIN keypad and as a coordinate fallback when a keypad node refuses ACTION_CLICK.
--->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewFocused"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds|flagRetrieveInteractiveWindows"
-    android:canPerformGestures="true"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagRequestFilterKeyEvents"
     android:canRetrieveWindowContent="true"
-    android:description="@string/acc_service_description"
-    android:notificationTimeout="50" />
+    android:canPerformGestures="true"
+    android:description="@string/acc_service_desc"
+    android:notificationTimeout="100"
+    android:settingsActivity="com.iranjan.hotspotscheduler.ui.setup.SetupActivity" />

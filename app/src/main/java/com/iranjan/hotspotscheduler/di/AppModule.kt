@@ -6,11 +6,48 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
-import com.iranjan.hotspotscheduler.accessibility.AccessibilityHotspotControllerImpl
-import com.iranjan.hotspotscheduler.accessibility.HotspotController
-import com.iranjan.hotspotscheduler.data.db.AppDatabase
-import com.iranjan.hotspotscheduler.data.db.RoutineDao
-import com.iranjan.hotspotscheduler.data.db.UsageDao
+import com.iranjan.hotspotscheduler.data.database.AppDatabase
+import com.iranjan.hotspotscheduler.data.database.RoutineDao
+import com.iranjan.hotspotscheduler.data.database.ExecutionRecordDao
+import com.iranjan.hotspotscheduler.data.repository.RoutineRepository
+import com.iranjan.hotspotscheduler.data.repository.RoutineRepositoryImpl
+import com.iranjan.hotspotscheduler.data.datastore.AutomationPreferences
+import com.iranjan.hotspotscheduler.data.datastore.AutomationPreferencesImpl
+import com.iranjan.hotspotscheduler.data.encrypted.CredentialVault
+import com.iranjan.hotspotscheduler.data.encrypted.CredentialVaultImpl
+import com.iranjan.hotspotscheduler.data.encrypted.PasswordVault
+import com.iranjan.hotspotscheduler.data.encrypted.PasswordVaultImpl
+import com.iranjan.hotspotscheduler.domain.scheduler.DesiredStateResolver
+import com.iranjan.hotspotscheduler.domain.scheduler.RoutineEvaluator
+import com.iranjan.hotspotscheduler.domain.scheduler.OperationOrder
+import com.iranjan.hotspotscheduler.automation.session.AutomationCoordinator
+import com.iranjan.hotspotscheduler.automation.session.DefaultSessionQueue
+import com.iranjan.hotspotscheduler.automation.session.SessionQueue
+import com.iranjan.hotspotscheduler.automation.transaction.TransactionExecutor
+import com.iranjan.hotspotscheduler.automation.transaction.TransactionExecutorImpl
+import com.iranjan.hotspotscheduler.automation.verification.VerificationEngine
+import com.iranjan.hotspotscheduler.automation.verification.VerificationEngineImpl
+import com.iranjan.hotspotscheduler.automation.recovery.ReconciliationEngine
+import com.iranjan.hotspotscheduler.automation.recovery.ReconciliationEngineImpl
+import com.iranjan.hotspotscheduler.platform.alarm.AlarmScheduler
+import com.iranjan.hotspotscheduler.platform.screen.ScreenSession
+import com.iranjan.hotspotscheduler.platform.screen.ScreenSessionImpl
+import com.iranjan.hotspotscheduler.platform.keyguard.KeyguardEngine
+import com.iranjan.hotspotscheduler.platform.keyguard.KeyguardEngineImpl
+import com.iranjan.hotspotscheduler.platform.keyguard.PinPadResolver
+import com.iranjan.hotspotscheduler.platform.accessibility.AccessibilityRuntime
+import com.iranjan.hotspotscheduler.platform.accessibility.AccessibilityRuntimeImpl
+import com.iranjan.hotspotscheduler.automation.strategies.OperationStrategyResolver
+import com.iranjan.hotspotscheduler.automation.strategies.SettingsNavigator
+import com.iranjan.hotspotscheduler.automation.strategies.SamsungSettingsNavigationStrategy
+import com.iranjan.hotspotscheduler.automation.strategies.NavigationStrategy
+import com.iranjan.hotspotscheduler.automation.strategies.SwitchFinder
+import com.iranjan.hotspotscheduler.automation.strategies.SamsungSettingsHotspotStrategy
+import com.iranjan.hotspotscheduler.automation.strategies.SamsungSettingsDataStrategy
+import com.iranjan.hotspotscheduler.automation.strategies.NetworkOperationStrategy
+import com.iranjan.hotspotscheduler.platform.screen.WakeEngine
+import com.iranjan.hotspotscheduler.automation.logger.AutomationLogger
+import com.iranjan.hotspotscheduler.automation.logger.AutomationLoggerImpl
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -21,18 +58,23 @@ import javax.inject.Singleton
 
 @Module
 @InstallIn(SingletonComponent::class)
-object AppModule {
+object DatabaseModule {
 
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
-        AppDatabase.build(context)
+        Room.databaseBuilder(context, AppDatabase::class.java, "hotspot_scheduler.db").build()
 
     @Provides
     fun provideRoutineDao(db: AppDatabase): RoutineDao = db.routineDao()
 
     @Provides
-    fun provideUsageDao(db: AppDatabase): UsageDao = db.usageDao()
+    fun provideExecutionRecordDao(db: AppDatabase): ExecutionRecordDao = db.executionRecordDao()
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object DataStoreModule {
 
     @Provides
     @Singleton
@@ -40,13 +82,154 @@ object AppModule {
         PreferenceDataStoreFactory.create(
             produceFile = { context.preferencesDataStoreFile("automation_prefs") }
         )
+
+    @Provides
+    @Singleton
+    fun provideCredentialDataStore(@ApplicationContext context: Context): DataStore<Preferences> {
+        val deContext = context.createDeviceProtectedStorageContext()
+        return PreferenceDataStoreFactory.create(
+            produceFile = { deContext.preferencesDataStoreFile("credential_vault") }
+        )
+    }
+
+    @Provides
+    @Singleton
+    fun providePasswordDataStore(@ApplicationContext context: Context): DataStore<Preferences> {
+        val deContext = context.createDeviceProtectedStorageContext()
+        return PreferenceDataStoreFactory.create(
+            produceFile = { deContext.preferencesDataStoreFile("password_vault") }
+        )
+    }
 }
 
 @Module
 @InstallIn(SingletonComponent::class)
-abstract class ControllerModule {
+object RepositoryModule {
 
     @Binds
+    abstract fun bindRoutineRepository(impl: RoutineRepositoryImpl): RoutineRepository
+
+    @Binds
+    abstract fun bindAutomationPreferences(impl: AutomationPreferencesImpl): AutomationPreferences
+
+    @Binds
+    abstract fun bindCredentialVault(impl: CredentialVaultImpl): CredentialVault
+
+    @Binds
+    abstract fun bindPasswordVault(impl: PasswordVaultImpl): PasswordVault
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object DomainModule {
+
+    @Provides
     @Singleton
-    abstract fun bindHotspotController(impl: AccessibilityHotspotControllerImpl): HotspotController
+    fun provideDesiredStateResolver(
+        routineRepository: RoutineRepository,
+        preferences: AutomationPreferences
+    ): DesiredStateResolver = DesiredStateResolver(routineRepository, preferences)
+
+    @Provides
+    @Singleton
+    fun provideOperationOrder(): OperationOrder = OperationOrder
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object PlatformModule {
+
+    @Provides
+    @Singleton
+    fun provideWakeEngine(@ApplicationContext context: Context): WakeEngine = WakeEngine(context)
+
+    @Provides
+    @Singleton
+    fun providePinPadResolver(accessibility: AccessibilityRuntime): PinPadResolver = PinPadResolver(accessibility)
+
+    @Binds
+    abstract fun bindScreenSession(impl: ScreenSessionImpl): ScreenSession
+
+    @Binds
+    abstract fun bindKeyguardEngine(impl: KeyguardEngineImpl): KeyguardEngine
+
+    @Binds
+    abstract fun bindAccessibilityRuntime(impl: AccessibilityRuntimeImpl): AccessibilityRuntime
+
+    @Binds
+    abstract fun bindAlarmScheduler(impl: AlarmScheduler): com.iranjan.hotspotscheduler.platform.alarm.AlarmScheduler
+
+    @Binds
+    abstract fun bindNavigationStrategy(impl: SamsungSettingsNavigationStrategy): NavigationStrategy
+
+    @Provides
+    @Singleton
+    fun provideSettingsNavigator(@ApplicationContext context: Context): SettingsNavigator = SettingsNavigator(context)
+
+    @Provides
+    @Singleton
+    fun provideSwitchFinder(accessibility: AccessibilityRuntime, prefs: AutomationPreferences): SwitchFinder =
+        SwitchFinder(accessibility, prefs)
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object AutomationModule {
+
+    @Provides
+    @Singleton
+    fun provideSessionQueue(): SessionQueue = DefaultSessionQueue()
+
+    @Provides
+    @Singleton
+    fun provideHotspotStrategies(
+        samsungSettings: SamsungSettingsHotspotStrategy
+    ): List<NetworkOperationStrategy> = listOf(samsungSettings)
+
+    @Provides
+    @Singleton
+    fun provideDataStrategies(
+        samsungData: SamsungSettingsDataStrategy
+    ): List<NetworkOperationStrategy> = listOf(samsungData)
+
+    @Provides
+    @Singleton
+    fun provideOperationStrategyResolver(
+        hotspotStrategies: List<NetworkOperationStrategy>,
+        dataStrategies: List<NetworkOperationStrategy>,
+        accessibility: AccessibilityRuntime,
+        screenSession: ScreenSession
+    ): OperationStrategyResolver = OperationStrategyResolver(hotspotStrategies, dataStrategies, accessibility, screenSession)
+
+    @Provides
+    @Singleton
+    fun provideTransactionExecutor(
+        screenSession: ScreenSession,
+        keyguardEngine: KeyguardEngine,
+        strategyResolver: OperationStrategyResolver,
+        verificationEngine: VerificationEngine,
+        logger: AutomationLogger
+    ): TransactionExecutor = TransactionExecutorImpl(screenSession, keyguardEngine, strategyResolver, verificationEngine, logger)
+
+    @Provides
+    @Singleton
+    fun provideVerificationEngine(strategyResolver: OperationStrategyResolver): VerificationEngine =
+        VerificationEngineImpl(strategyResolver)
+
+    @Provides
+    @Singleton
+    fun provideReconciliationEngine(): ReconciliationEngine = ReconciliationEngineImpl()
+
+    @Provides
+    @Singleton
+    fun provideAutomationLogger(): AutomationLogger = AutomationLoggerImpl()
+
+    @Provides
+    @Singleton
+    fun provideAutomationCoordinator(
+        sessionQueue: SessionQueue,
+        transactionExecutor: TransactionExecutor,
+        alarmScheduler: AlarmScheduler,
+        preferences: AutomationPreferences
+    ): AutomationCoordinator = AutomationCoordinator(sessionQueue, transactionExecutor, alarmScheduler, preferences)
 }

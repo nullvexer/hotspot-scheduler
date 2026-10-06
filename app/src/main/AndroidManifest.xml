@@ -14,21 +14,24 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
 
     <queries>
         <package android:name="com.android.settings" />
         <package android:name="com.samsung.android.settings" />
+        <package android:name="com.android.systemui" />
+        <package android:name="com.android.keyguard" />
     </queries>
 
     <application
         android:name=".HotspotApp"
         android:allowBackup="false"
-        android:icon="@drawable/ic_app_icon"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.HotspotScheduler">
 
         <activity
-            android:name=".ui.MainActivity"
+            android:name=".ui.dashboard.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -36,9 +39,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Foreground host for the automation flow: wakes the screen, hosts
-             requestDismissKeyguard (which requires an Activity), and gives Settings a visible
-             context to launch from, since Android blocks background activity starts. -->
         <activity
             android:name=".accessibility.ToggleHostActivity"
             android:excludeFromRecents="true"
@@ -69,11 +69,11 @@
         </service>
 
         <receiver
-            android:name=".core.AlarmReceiver"
+            android:name=".platform.alarm.AlarmReceiver"
             android:exported="false" />
 
         <receiver
-            android:name=".core.SystemEventsReceiver"
+            android:name=".platform.alarm.SystemEventsReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -83,23 +83,5 @@
             </intent-filter>
         </receiver>
 
-        <receiver
-            android:name=".service.ActionReceiver"
-            android:exported="false" />
-
-        <!-- No device administrator any more: screen-off uses
-             AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN (API 28+), which needs no extra
-             permission and no visible system entry. -->
-
-        <receiver
-            android:name=".service.WidgetProvider"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/widget_info" />
-        </receiver>
     </application>
 </manifest>
